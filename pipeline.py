@@ -11,7 +11,7 @@ import config
 from facts import NOT_FACT_KINDS, num, parse_date, resolve
 from llm import Budgeter, Trace, call_model
 from planner import build_plan
-from reader import METRICS, read_messages, split_messages, text_hash
+from reader import METRICS, header, read_messages, split_messages, text_hash
 from validate import checkable
 
 AREAS = ("venue", "schedule", "food", "judging", "budget")
@@ -128,6 +128,8 @@ def process(text, source="input"):
                 state["messages"].remove(m)
                 report["notes"].append(f"{m['id']} could not be read this run; run the command again to read it")
                 continue
+            hdr = header(m["text"])
+            pm.frm, pm.date = pm.frm or hdr["from"], pm.date or hdr["date"]
             m.update(sender=pm.frm, role=pm.role, date=pm.date)
             if pm.inj:
                 report["notes"].append(f"{m['id']}: contains instructions to the system; ignored as instructions")

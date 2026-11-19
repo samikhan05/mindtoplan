@@ -219,6 +219,8 @@ def _anchored(seq, anchors, start, total, issues):
     end = start + total
     items = [{"name": n, "min": m, "f": f} for n, m, f in seq if m > 0 and not n.startswith("Hacking")]
     for f, sp in anchors:
+        if sp is None and not any(ch.isdigit() for ch in str(f["v"])):
+            continue   # no clock time at all (e.g. a format placeholder echoed by the model): nothing to pin
         hit = next((it for it in items if _words(it["name"]) & _words(f["e"])), None)
         if hit is None:
             issues["unresolved"].append(f"time for '{f['e']}' ({f['v']}) matches no schedule block")
