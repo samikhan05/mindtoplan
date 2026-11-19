@@ -99,6 +99,7 @@ def food_options(v):
         tier = norm(o["tier"]["v"]) if "tier" in o else ""
         out.append({"name": o["_name"], "pph": num(o["price_per_head"]["v"]),
                     "delivery": num(o["delivery_fee"]["v"]) if "delivery_fee" in o else general_fee,
+                    "delivery_stated": "delivery_fee" in o or bool(general),
                     "tier": tier, "evidence": ev(o["price_per_head"])})
     # preference: the standard option first, then cheaper ones (fallback when budget fails)
     # untagged options: fuller (pricier) meal first; build_plan falls back to cheaper ones if the budget fails
@@ -422,6 +423,8 @@ def assemble(v, d, venue, venues_ok, venues_rej, needs, food, qty_f):
                 diet_issues.append(f"{n} {f['e']} meals needed but no {f['e']} option was quoted")
             elif n:
                 splits.append({"diet": f["e"], "qty": n, "name": opt["name"], "pph": opt["pph"], "evidence": ev(f)})
+        if not food.get("delivery_stated", True):
+            dd["assumptions"].append("food delivery Rs 0 (no delivery charge stated in messages; planning default)")
         main_qty = max(qty - sum(s["qty"] for s in splits), 0)
         cost = main_qty * food["pph"] + sum(s["qty"] * s["pph"] for s in splits) + (food["delivery"] or 0)
         food_sec = {**food, "qty": qty, "main_qty": main_qty, "splits": splits, "diet_issues": diet_issues,

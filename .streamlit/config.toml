@@ -1,0 +1,5 @@
+# Pin Streamlit's own widgets to the light base theme. Without this, a PC in Windows dark mode draws the
+# file chip, alerts and toggle dark while app.py paints a light page around them (unreadable).
+# The in-app "Dark mode" toggle restyles everything through ui.py instead.
+[theme]
+base = "light"

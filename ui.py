@@ -30,6 +30,14 @@ h3{font-size:1.45rem!important;font-weight:500!important;margin:1.4rem 0 .6rem!i
 [data-testid="stExpander"] summary p{font-family:var(--mono);font-size:.76rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 textarea,input,[data-baseweb="select"]>div,[data-testid="stFileUploaderDropzone"]{background:var(--card)!important;color:var(--text)!important;border-color:var(--border)!important;border-radius:8px!important}
 textarea{font-family:var(--mono)!important;font-size:.85rem!important}
+[data-testid="stFileUploaderDropzone"] *{color:var(--muted)!important}
+[data-testid="stFileChip"]{background:var(--card2)!important;border:1px solid var(--border)!important;border-radius:6px}
+[data-testid="stFileChip"] *,[data-testid="stFileChipName"]{color:var(--text)!important}
+[data-testid="stAlertContainer"]{background:var(--warnbg)!important;border-left:4px solid var(--warn);border-radius:8px}
+[data-testid="stAlertContainer"] *{color:var(--text)!important}
+[data-testid="stCheckbox"] label>div:first-child{background:var(--border)!important}
+[data-testid="stCheckbox"] label:has(input:checked)>div:first-child{background:var(--accent)!important}
+[data-testid="stCheckbox"] label>div:first-child>div{background:#fff!important}
 .stButton button,.stDownloadButton button{border-radius:6px;border:1px solid var(--border);background:var(--card2);color:var(--text);font-weight:600;letter-spacing:.04em;text-transform:uppercase;font-size:.78rem;transition:filter .15s,border-color .15s}
 .stButton button:hover,.stDownloadButton button:hover{border-color:var(--accent);color:var(--accent)}
 .stButton button[kind="primary"],.stDownloadButton button[kind="primary"]{background:var(--accent);color:#fff;border-color:var(--accent)}
@@ -53,7 +61,7 @@ code,pre{background:var(--card2)!important;color:var(--text)!important;font-fami
 .slabel{font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;font-weight:600;margin:12px 0 4px}
 .steps{display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px}
 .step{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:999px;font-size:.76rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;background:var(--card2);color:var(--text)}
-.step.done{background:var(--okbg);color:var(--ok)} .step.now{background:var(--badbg);color:var(--bad)}
+.step.done{background:var(--okbg);color:var(--ok)} .step.now{background:var(--accent2);color:var(--accent);box-shadow:inset 0 0 0 1.5px var(--accent)}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin:8px 0 14px;animation:fade .25s ease-out both}
 .status{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .status .s{display:inline-flex;align-items:center;gap:6px;padding:5px 16px;border-radius:999px;font-weight:600;font-size:.8rem;letter-spacing:.06em;color:#fff!important;background:var(--muted)}
