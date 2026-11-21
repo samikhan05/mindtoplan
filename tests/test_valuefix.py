@@ -73,7 +73,37 @@ def test_explicit_no_charge_wording_means_zero(k, q, want):
     ("delivery_fee", "delivery fee waived above Rs 50,000"),    # a number is present: no guessing
     ("students", "entry is free for all students"),             # not a charge field
     ("price", "parking is free"),                               # bare "free" never counts
+    # review findings: negations and qualified "no ... charge" must not become a zero price
+    ("delivery_fee", "Delivery fee will not be waived"),
+    ("delivery_fee", "We cannot waive the delivery charge"),
+    ("price_per_head", "Cold drinks included, no extra charge"),
+    ("price_per_head", "No service charge on the biryani box"),
+    ("price", "no hidden charges, rent confirmed"),
+    ("honorarium", "Judges said no fee discussion until Friday"),
+    ("price_per_head", "no delivery charge on lunch boxes"),     # delivery wording, not the meal price
 ])
 def test_no_charge_wording_is_not_over_applied(k, q):
     got = recover(it(k, q))
     assert got is None or got[0] != 0
+
+
+@pytest.mark.parametrize("k, q", [
+    ("delivery_fee", "No delivery fee"),
+    ("delivery_fee", "no delivery charges from today"),
+    ("price", "Seminar hall, no charge."),
+    ("delivery_fee", "delivery muft hai"),
+])
+def test_plain_no_charge_still_means_zero(k, q):
+    assert recover(it(k, q))[0] == 0
+
+
+# review finding (also on the 7ca59c7 baseline): a comma right after a number cut it short (50,000 -> 50)
+@pytest.mark.parametrize("k, q, want", [
+    ("price", "Hall rent Rs 50,000, generator included", 50000),
+    ("delivery_fee", "Delivery Rs 3,000, sandwich later", 3000),
+    ("price", "Hall B Rs 1,80,000, AC included", 180000),
+    ("students", "120, not 150", None),                       # two numbers: still never guessed
+])
+def test_comma_after_a_number_does_not_cut_it(k, q, want):
+    got = recover(it(k, q))
+    assert (got and got[0]) == want if want is not None else got is None

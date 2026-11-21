@@ -15,7 +15,8 @@ VALUE_KEYS = NUMBER_KEYS | DURATION_KEYS | TIME_KEYS
 
 _TIME = re.compile(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b|\b(\d{1,2})\s*(am|pm)\b", re.I)
 # 1,234,567 (international) | 1,80,000 / 12,50,000 (South Asian lakh grouping) | 1234
-_NUM = re.compile(r"(?<![\w.:,])(\d{1,3}(?:,\d{3})+(?![\d,])|\d{1,2}(?:,\d{2})+,\d{3}(?![\d,])|\d+)(\.\d+)?(?![\d:])")
+# a comma after a number ends it ("Rs 50,000, generator included" is 50000, not 50)
+_NUM = re.compile(r"(?<![\w.:,])(\d{1,3}(?:,\d{3})+(?!,?\d)|\d{1,2}(?:,\d{2})+,\d{3}(?!,?\d)|\d+)(\.\d+)?(?![\d:])")
 _SCALE = re.compile(r"^\s*(k\b|lakh|lac|crore|million|thousand|m\b|bn|billion)", re.I)
 _DUR = re.compile(r"^\s*-?\s*(minutes?|mins?|hours?|hrs?|h\b)", re.I)
 
@@ -47,13 +48,20 @@ def _clock(m):
 # never counts ("Hall A is free on Monday" means available); delivery phrases only for the delivery fee.
 CHARGE_KEYS = {"delivery_fee", "price", "price_per_head", "honorarium", "cost_per_team", "cost_per_student",
                "cost_per_person", "cost_per_judge"}
-_NO_CHARGE = re.compile(r"\b(waived?|no (?:\w+ )?(?:charges?|fees?)|free of (?:charge|cost)|without (?:any )?charge|"
-                        r"muft)\b", re.I)
-_FREE_DELIVERY = re.compile(r"\b(free delivery|delivery (?:is |will be |hai |bhi )?free)\b", re.I)
+# "no charge"/"no fee" only when nothing qualifies it ("no extra charge", "no service charge" and "no fee discussion"
+# say nothing about this price being zero)
+_NO_CHARGE = re.compile(r"\b(waived?|free of (?:charge|cost)|without (?:any )?charges?|muft)\b|"
+                        r"\bno (?:charges?|fees?)(?=\s*(?:[.,;:!?)]|$|\b(?:now|ab|hai|at all)\b))", re.I)
+_FREE_DELIVERY = re.compile(r"\b(free delivery|delivery (?:is |will be |hai |bhi )?free|"
+                            r"no delivery (?:charges?|fees?))\b", re.I)
+# an English negation turns "waived" into its opposite ("will not be waived", "cannot waive")
+_NEGATION = re.compile(r"\b(not|cannot|can't|can not|won't|wont|isn't|aren't|never|no longer)\b", re.I)
 
 
 def _zero_charge(k, text):
-    return k in CHARGE_KEYS and (bool(_NO_CHARGE.search(text)) or (k == "delivery_fee" and bool(_FREE_DELIVERY.search(text))))
+    if k not in CHARGE_KEYS or _NEGATION.search(text):
+        return False
+    return bool(_NO_CHARGE.search(text)) or (k == "delivery_fee" and bool(_FREE_DELIVERY.search(text)))
 
 
 def recover(item):
@@ -104,8 +112,8 @@ def accepts(item, value, text):
     v = num(value)
     if v is None:
         return None
-    if v == 0 and _zero_charge(k, text):
-        return 0                                        # "delivery charge waived": 0 is what the message says
+    if v == 0 and _zero_charge(k, item.get("q") or ""):
+        return 0          # the fact's OWN quote says no charge (another charge waived in the message does not count)
     written = {float((m.group(1) + (m.group(2) or "")).replace(",", "")) for m in _NUM.finditer(text)}
     if v in written:
         return int(v) if v == int(v) else v

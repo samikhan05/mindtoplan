@@ -230,3 +230,35 @@ def test_used_up_quota_on_primary_still_tries_a_working_fallback(monkeypatch):
     t = Trace()
     assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") == {"ok": True}
     assert seen == ["primary", "backup"] and "trying fallback" in t.records[0]["error"]
+
+
+def test_bad_request_on_fallback_does_not_disable_it_for_the_process(monkeypatch):
+    # review finding: only 401/402/403 (or a used-up quota) mean the backup itself is unusable; a 400 is this request
+    _route(monkeypatch, fallback=True)
+    seen = _clients(monkeypatch, {"primary": [503, '{"ok": true}'], "backup": [400]})
+    assert llm.call_model(Budgeter("update"), Trace(), "reading", "s", "u", ["M1"], "U1") == {"ok": True}
+    assert seen == ["primary", "backup", "primary"] and not llm._BROKEN_ROUTES
+
+
+def test_used_up_quota_and_unusable_fallback_stops_without_returning_to_primary(monkeypatch):
+    # review finding: after the backup failed (402) the call went back to the primary whose quota was already gone
+    _route(monkeypatch, fallback=True)
+    seen, pauses = [], []
+    monkeypatch.setattr(llm.time, "sleep", pauses.append)
+
+    class _NoCredit(Exception):
+        status_code = 402
+        response = NS(text="This request requires more credits")
+
+    def make(timeout, route=None):
+        model = (route or llm._routes()[0])[1]
+
+        def create(**kw):
+            seen.append(model)
+            raise _QuotaError() if model == "primary" else _NoCredit()
+        return NS(chat=NS(completions=NS(create=create)))
+    monkeypatch.setattr(llm, "_client", make)
+    t, b = Trace(), Budgeter("update")
+    assert llm.call_model(b, t, "reading", "s", "u", ["M1"], "U1") is None
+    assert seen == ["primary", "backup"] and b.calls == 2 and not pauses
+    assert "quota used up" in t.records[0]["error"] and "requires more credits" in t.records[1]["error"]

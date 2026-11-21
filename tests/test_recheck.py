@@ -98,6 +98,14 @@ def test_accepts_only_values_written_in_text(k, value, text, want):
 
 
 def test_recheck_zero_accepted_only_with_no_charge_wording():
-    assert accepts({"k": "delivery_fee"}, 0, "delivery charge waived, no delivery fee now") == 0
-    assert accepts({"k": "delivery_fee"}, 0, "delivery is Rs 5,000") is None
-    assert accepts({"k": "price"}, 0, "Hall A is free on Monday") is None
+    waived = "delivery charge waived, no delivery fee now"
+    assert accepts({"k": "delivery_fee", "q": waived}, 0, waived) == 0
+    assert accepts({"k": "delivery_fee", "q": "delivery is Rs 5,000"}, 0, "delivery is Rs 5,000") is None
+    assert accepts({"k": "price", "q": "Hall A is free on Monday"}, 0, "Hall A is free on Monday") is None
+
+
+def test_recheck_zero_needs_the_facts_own_quote_not_another_charge_in_the_message():
+    # review finding: the hall rent was accepted as 0 because the DELIVERY charge in the same message was waived
+    msg = "Hall C rent to be confirmed. Delivery charge waived."
+    assert accepts({"k": "price", "q": "Hall C rent to be confirmed"}, 0, msg) is None
+    assert accepts({"k": "delivery_fee", "q": "Delivery charge waived"}, 0, msg) == 0

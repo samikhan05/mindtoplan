@@ -11,7 +11,7 @@ AREAS = ("reading", "venue", "schedule", "food", "judging", "budget")
 
 class ConfigError(Exception):
     pass
-    
+
 
 class BudgetExhausted(Exception):
     pass
@@ -164,6 +164,7 @@ def _client(timeout, route=None):
 RETRYABLE = (429, 500, 502, 503, 504)   # overloaded / rate limited / server error: worth another attempt
 MAX_ATTEMPTS = 3          # any error
 OVERLOAD_ATTEMPTS = 4     # overload/rate-limit errors only (they return no tokens); still bounded by the Budgeter
+UNUSABLE = (401, 402, 403)   # bad key / no credit / no access (or used-up quota): a route that stays broken
 
 
 class ResponseSchemaError(Exception):
@@ -181,6 +182,7 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
     routes, route = _routes(), _routes()[0]
     limit = attempts                     # raised to OVERLOAD_ATTEMPTS only while the provider reports overload
     attempt = 0
+    primary_spent = False                # the primary reported a used-up quota during this call
     while attempt < limit:
         attempt += 1
         if not budgeter.can_call():
@@ -238,6 +240,7 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
                 # a used-up quota (e.g. a daily free-tier limit) is not a short overload: waiting will not fix it,
                 # but another provider can still answer the same request
                 if len(routes) > 1 and route == routes[0]:
+                    primary_spent = True       # never come back to it in this call: it cannot answer today
                     route = routes[1]
                     rec["error"] += f" | quota used up: trying fallback {route[1]}"
                     continue
@@ -245,8 +248,12 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
                 rec["error"] += " | quota used up: treated as not retryable"
             if status is not None and status not in RETRYABLE:
                 if len(routes) > 1 and route == routes[1]:
-                    _BROKEN_ROUTES.add(route[:2])   # skip it for the rest of this process, not just this call
-                    route = routes[0]          # the backup itself is broken (e.g. bad key): back to primary
+                    if status in UNUSABLE:     # no credit / bad key / no access: skip it for the rest of the process
+                        _BROKEN_ROUTES.add(route[:2])
+                    if primary_spent:
+                        rec["error"] += " | fallback unusable and primary quota used up: not retried"
+                        return None
+                    route = routes[0]          # the backup failed for good: back to primary for this call
                     routes = routes[:1]
                     rec["error"] += " | fallback unusable, retrying primary"
                     if budgeter.remaining() > 15:
