@@ -77,11 +77,14 @@ def check(exp, got):
     return bad
 
 
-def run_scenario(code, name, steps, py, keep=False):
+def run_scenario(code, name, steps, py, keep=False, env=()):
     work = Path(tempfile.mkdtemp(prefix=f"bench_{name}_"))
     for f in code.glob("*.py"):
         shutil.copy(f, work)
     shutil.copy(ROOT / ".env", work)
+    if env:   # overrides for an experiment (e.g. MODEL_NAME=...); later lines win in .env
+        with open(work / ".env", "a", encoding="utf-8") as fh:
+            fh.write("\n" + "\n".join(env) + "\n")
     rows = []
     for msg_file, exp in steps:
         time.sleep(PAUSE)   # free-tier keys rate-limit bursts (429); a pause keeps retries out of the numbers
@@ -116,6 +119,8 @@ def main():
     ap.add_argument("--only", nargs="*", help="scenario names")
     ap.add_argument("--json", help="write raw results here")
     ap.add_argument("--keep", action="store_true", help="keep each scenario's work folder (state + trace)")
+    ap.add_argument("--env", nargs="*", default=[], help="KEY=VALUE overrides for this benchmark only")
+    ap.add_argument("--full-only", action="store_true", help="only the first (full-run) step of each scenario")
     a = ap.parse_args()
     code, py = Path(a.code).resolve(), sys.executable
     results = []
@@ -123,7 +128,7 @@ def main():
         for name, steps in SCENARIOS.items():
             if a.only and name not in a.only:
                 continue
-            for row in run_scenario(code, name, steps, py, a.keep):
+            for row in run_scenario(code, name, steps[:1] if a.full_only else steps, py, a.keep, a.env):
                 row.update(scenario=name, run=run)
                 results.append(row)
                 mark = "OK  " if not row["fail"] else "FAIL"
