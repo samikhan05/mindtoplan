@@ -81,8 +81,10 @@ def _rule_fallback(item, budgeter, trace, update_id):
     system = ('Turn the requirement into JSON {"m":metric,"op":"eq|ne|lt|lte|gt|gte|requires|excludes|within",'
               '"v":value} using ONLY a metric from: ' + METRICS + '. Minutes for times. If impossible return {"m":null}.')
     out = call_model(budgeter, trace, area, system, item["q"], [item["msg"]], update_id, max_tokens=120,
-                     attempts=2)   # small optional call: one retry at most
-    return out if out and out.get("m") else None
+                     attempts=2, expect=dict)   # small optional call: one retry at most
+    # anything but a usable {"m": ...} object leaves the rule as it was (no checkable form): it is kept and shows
+    # as UNRESOLVED, so the plan reads NEEDS CLARIFICATION instead of the requirement disappearing
+    return out if isinstance(out, dict) and out.get("m") else None
 
 
 def _failing(plan):
@@ -105,6 +107,10 @@ def process(text, source="input"):
     report = {"update_id": update_id, "mode": mode, "time": datetime.now().isoformat(timespec="seconds"),
               "source": source, "new_messages": [], "accepted": [], "rejected": [], "impact": {},
               "incomplete": False, "notes": []}
+    # committed state before this run; restored if the run fails before _transaction() commits, so a failed
+    # message is never stored as "seen" without its facts (the next run reads it again)
+    snapshot = {k: copy.deepcopy(state.get(k)) for k in ("messages", "items", "plan", "previous_plan", "next_order")}
+    committed = False
     try:
         seen = {m["hash"] for m in state["messages"]}
         blocks = [b for b in split_messages(text) if text_hash(b) not in seen]
@@ -177,6 +183,7 @@ def process(text, source="input"):
                     it["c"] = c
 
         _transaction(state, new_items, mode, report)
+        committed = True
         for m in new:
             if m["status"] == "pending":
                 mine = [i for i in state["items"] if i["msg"] == m["id"]]
@@ -199,7 +206,15 @@ def process(text, source="input"):
     except Exception as e:
         report["incomplete"] = True
         report["notes"].append(f"error: {type(e).__name__}: {e}; previous plan kept")
+        if not committed:
+            # roll back messages/facts/plan/order counter; the trace (calls made, tokens, errors) is kept as is
+            for k, v in snapshot.items():
+                state[k] = v
+            report["rolled_back"] = True
+            report["notes"].append("run rolled back: these messages were not stored as processed; "
+                                   "run the same input again to retry them")
         if type(e).__name__ == "ConfigError":
+            _finish(state, report, trace, budgeter, calls_before)
             raise
         return _finish(state, report, trace, budgeter, calls_before)
 

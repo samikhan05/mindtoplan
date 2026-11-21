@@ -150,7 +150,7 @@ def test_unexpressed_rule_gets_one_area_tagged_call(script, monkeypatch):
                                 "q": "hall must hold no more than 150 people"}], False)
     calls = []
 
-    def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0, attempts=1):
+    def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0, **kw):
         budgeter.calls += 1
         calls.append(area)
         return {"m": "headcount", "op": "lte", "v": 150}

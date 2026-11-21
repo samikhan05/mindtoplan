@@ -143,10 +143,17 @@ RETRYABLE = (429, 500, 502, 503, 504)   # overloaded / rate limited / server err
 MAX_ATTEMPTS = 3
 
 
-def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_tokens=2000, attempts=MAX_ATTEMPTS):
-    """One logical call: up to MAX_ATTEMPTS tries (each counted as a call). Overload errors retry with a pause,
-    on the FALLBACK route if one is set; errors a retry cannot fix (bad key, bad request) stop at once.
-    Returns parsed JSON dict or None. Never raises for API errors."""
+class ResponseSchemaError(Exception):
+    """The reply parsed as JSON but its top-level type is not what the caller expects (e.g. a list where an
+    object is required). Deterministic for the same request, so it is recorded and never retried."""
+
+
+def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_tokens=2000, attempts=MAX_ATTEMPTS,
+               expect=dict):
+    """One logical call: up to `attempts` tries (each counted as a call). Overload errors retry with a pause,
+    on the FALLBACK route if one is set; errors a retry cannot fix (bad key, bad request, wrong reply shape) stop
+    at once. `expect`: the JSON top-level type(s) the caller accepts (default: an object).
+    Returns the parsed JSON value or None. Never raises for API or reply errors."""
     assert area in AREAS
     routes, route = _routes(), _routes()[0]
     for attempt in range(1, attempts + 1):
@@ -182,11 +189,17 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
                 if details is not None and getattr(details, "cached_tokens", None):
                     rec["cached_input_tokens"] = details.cached_tokens   # still part of input_tokens
             parsed = parse_json(rec["output"])
+            if not isinstance(parsed, expect):
+                want = " or ".join(t.__name__ for t in (expect if isinstance(expect, tuple) else (expect,)))
+                raise ResponseSchemaError(f"reply top level is JSON {type(parsed).__name__}, expected {want}")
             rec["ok"] = True
             return parsed
         except ConfigError:
             budgeter.calls -= 1   # no request was sent, so no call happened
             raise
+        except ResponseSchemaError as e:
+            rec["error"] = f"ResponseSchemaError: {e} | not retried (same request gives the same shape)"
+            return None   # finally still records it (tokens were used and are reported)
         except Exception as e:  # API error, timeout or invalid JSON: record honestly
             rec["error"] = f"{type(e).__name__}: {str(e)[:300]}"
             resp = getattr(e, "response", None)

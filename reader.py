@@ -209,7 +209,7 @@ def read_messages(msgs, known_entities, budgeter, trace, update_id):
         body = "Entities already known (reuse these names for the same things): " + \
                "; ".join(f"{a}: {', '.join(es)}" for a, es in groups.items()) + "\n" + body
     out = call_model(budgeter, trace, "reading", SYSTEM, body, [m["id"] for m in msgs], update_id,
-                     max_tokens=4000)
+                     max_tokens=4000, expect=(dict, list))   # list = known wrapper slips, unwrapped just below
     if out is None:
         return None
     if isinstance(out, list):          # some models drop the outer {"m": ...} wrapper, or wrap it in a list
