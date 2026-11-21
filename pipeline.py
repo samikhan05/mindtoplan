@@ -77,6 +77,14 @@ def _latest_month(dates):
     return max(months) if months else None
 
 
+def _read(msgs, known, budgeter, trace, update_id):
+    """Extraction call. Default: the generic reader. EXTRACTION_MODE=fixed selects the fixed-field experiment."""
+    if config.EXTRACTION_MODE == "fixed":
+        from fixedfields import read_messages_fixed
+        return read_messages_fixed(msgs, known, budgeter, trace, update_id)
+    return read_messages(msgs, known, budgeter, trace, update_id)
+
+
 def _rule_fallback(item, budgeter, trace, update_id):
     """Escape hatch: a hard rule with no checkable form gets ONE call tagged with its area."""
     area = item["a"] if item["a"] in AREAS else "budget"
@@ -185,7 +193,7 @@ def process(text, source="input"):
             return _finish(state, report, trace, budgeter, calls_before)
 
         known = sorted({f"{i['a']}:{i['e']}" for i in state["items"] if i["e"] and i["t"] not in NOT_FACT_KINDS})
-        parsed = read_messages([{"id": m["id"], "text": m["text"]} for m in new],
+        parsed = _read([{"id": m["id"], "text": m["text"]} for m in new],
                                known if mode == "update" else [], budgeter, trace, update_id)
         if parsed is None:
             for m in new:   # unread messages are not marked seen, so the next run retries them
@@ -196,7 +204,7 @@ def process(text, source="input"):
         omitted = [m for m in new if m["id"] not in parsed]
         if omitted and parsed:
             # messages the reply has no record for (omitted or unrepairable): re-read ONLY those, once, now
-            again = read_messages([{"id": m["id"], "text": m["text"]} for m in omitted],
+            again = _read([{"id": m["id"], "text": m["text"]} for m in omitted],
                                   known if mode == "update" else [], budgeter, trace, update_id)
             got = sorted((again or {}).keys() & {m["id"] for m in omitted}, key=lambda x: int(x[1:]))
             parsed.update({k: again[k] for k in got})

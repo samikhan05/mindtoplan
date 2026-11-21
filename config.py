@@ -12,6 +12,7 @@ BASE_URL = os.getenv("BASE_URL", "").strip()
 MODEL_NAME = os.getenv("MODEL_NAME", "").strip()
 API_KEY = os.getenv("API_KEY", "").strip()
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "").strip()   # optional, for thinking models (e.g. low)
+EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "generic").strip() or "generic"   # experiment: "fixed"
 # Optional backup route, used only when the primary answers "overloaded" (429/5xx): same task, other provider
 FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "").strip()
 FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "").strip()
