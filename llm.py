@@ -43,15 +43,24 @@ class Trace:
         self.records = records or []
 
     def totals(self, records=None):
+        """Sums of PROVIDER-REPORTED usage only; nothing is estimated. A call with no usage at all is counted
+        in 'unavailable' (never as zero tokens); partial usage (e.g. no total) keeps the parts it has."""
         recs = self.records if records is None else records
-        t = {"calls": len(recs), "input": 0, "output": 0, "total": 0, "unavailable": 0}
+        t = {"calls": len(recs), "input": 0, "output": 0, "total": 0, "unavailable": 0, "failed": 0,
+             "retries": 0, "cached_input": 0, "by_area": {}}
         for r in recs:
-            if r["total_tokens"] is None:
+            t["failed"] += not r.get("ok")
+            t["retries"] += r.get("attempt", 1) > 1
+            t["cached_input"] += r.get("cached_input_tokens") or 0
+            parts = [r.get("input_tokens"), r.get("output_tokens"), r.get("total_tokens")]
+            if all(v is None for v in parts):
                 t["unavailable"] += 1
                 continue
-            t["input"] += r["input_tokens"] or 0
-            t["output"] += r["output_tokens"] or 0
-            t["total"] += r["total_tokens"]
+            total = r["total_tokens"] if r.get("total_tokens") is not None else                 (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0)
+            t["input"] += r.get("input_tokens") or 0
+            t["output"] += r.get("output_tokens") or 0
+            t["total"] += total
+            t["by_area"][r["area"]] = t["by_area"].get(r["area"], 0) + total
         return t
 
 
@@ -134,13 +143,13 @@ RETRYABLE = (429, 500, 502, 503, 504)   # overloaded / rate limited / server err
 MAX_ATTEMPTS = 3
 
 
-def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_tokens=2000):
+def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_tokens=2000, attempts=MAX_ATTEMPTS):
     """One logical call: up to MAX_ATTEMPTS tries (each counted as a call). Overload errors retry with a pause,
     on the FALLBACK route if one is set; errors a retry cannot fix (bad key, bad request) stop at once.
     Returns parsed JSON dict or None. Never raises for API errors."""
     assert area in AREAS
     routes, route = _routes(), _routes()[0]
-    for attempt in range(1, MAX_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         if not budgeter.can_call():
             budgeter.incomplete = True
             return None
@@ -161,10 +170,17 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
             rec["model"] = resp.model or route[1]
             rec["output"] = resp.choices[0].message.content or ""
-            if resp.usage:
-                rec["input_tokens"] = resp.usage.prompt_tokens
-                rec["output_tokens"] = resp.usage.completion_tokens
-                rec["total_tokens"] = resp.usage.total_tokens
+            u = resp.usage
+            if u:   # provider-reported only; a missing field stays None (never estimated)
+                rec["input_tokens"] = getattr(u, "prompt_tokens", None)
+                rec["output_tokens"] = getattr(u, "completion_tokens", None)
+                rec["total_tokens"] = getattr(u, "total_tokens", None)
+                if rec["total_tokens"] is None and None not in (rec["input_tokens"], rec["output_tokens"]):
+                    rec["total_tokens"] = rec["input_tokens"] + rec["output_tokens"]
+                    rec["usage_note"] = "total = input + output (provider sent no total)"
+                details = getattr(u, "prompt_tokens_details", None)
+                if details is not None and getattr(details, "cached_tokens", None):
+                    rec["cached_input_tokens"] = details.cached_tokens   # still part of input_tokens
             parsed = parse_json(rec["output"])
             rec["ok"] = True
             return parsed

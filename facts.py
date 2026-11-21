@@ -134,7 +134,8 @@ class View:
 # generic facility vocabulary: different words for the same facility (no pack facts)
 FACILITY_GROUPS = [
     {"step free", "stepfree", "step-free", "ramp", "wheelchair", "ground floor", "accessible", "accessibility",
-     "lift", "elevator", "barrier free", "disabled access"},
+     "lift", "elevator", "barrier free", "disabled access", "no stairs", "without stairs", "stair free",
+     "stairless", "level access", "no steps"},
     {"generator", "backup power", "power backup", "standby power", "ups"},
     {"projector", "screen", "multimedia", "display"},
     {"air conditioning", "air conditioned", "ac", "a c", "cooling"},

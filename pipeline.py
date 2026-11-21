@@ -60,9 +60,19 @@ def new_state():
     return {"messages": [], "items": [], "plan": None, "trace": [], "updates": [], "next_order": 0}
 
 
-def _order_key(date_str, seq):
+def _order_key(date_str, seq, latest_month=None):
+    """Chronological key from a year-less date. Dates have no year, so when a pack spans a new year
+    (latest month Dec, some messages in Jan) a month more than 6 before the latest counts as next year."""
     d = parse_date(date_str)
-    return (d[0] * 100 + d[1]) if d else 10_000 + seq
+    if not d:
+        return 10_000 + seq
+    month = d[0] + 12 if latest_month and latest_month - d[0] > 6 else d[0]
+    return month * 100 + d[1]
+
+
+def _latest_month(dates):
+    months = [d[0] for d in map(parse_date, dates) if d]
+    return max(months) if months else None
 
 
 def _rule_fallback(item, budgeter, trace, update_id):
@@ -70,7 +80,8 @@ def _rule_fallback(item, budgeter, trace, update_id):
     area = item["a"] if item["a"] in AREAS else "budget"
     system = ('Turn the requirement into JSON {"m":metric,"op":"eq|ne|lt|lte|gt|gte|requires|excludes|within",'
               '"v":value} using ONLY a metric from: ' + METRICS + '. Minutes for times. If impossible return {"m":null}.')
-    out = call_model(budgeter, trace, area, system, item["q"], [item["msg"]], update_id, max_tokens=80)
+    out = call_model(budgeter, trace, area, system, item["q"], [item["msg"]], update_id, max_tokens=120,
+                     attempts=2)   # small optional call: one retry at most
     return out if out and out.get("m") else None
 
 
@@ -99,6 +110,9 @@ def process(text, source="input"):
         blocks = [b for b in split_messages(text) if text_hash(b) not in seen]
         new = []
         for b in blocks:
+            if text_hash(b) in seen:     # the same message twice in one file: read it once (saves tokens)
+                report["notes"].append("duplicate message skipped: " + " ".join(b.split())[:60])
+                continue
             mid = f"M{len(state['messages']) + 1}"
             msg = {"id": mid, "text": b, "hash": text_hash(b), "update_id": update_id, "status": "pending",
                    "reason": "", "sender": "", "role": "", "date": ""}
@@ -121,6 +135,7 @@ def process(text, source="input"):
             return _finish(state, report, trace, budgeter, calls_before)
 
         new_items = []
+        latest = _latest_month([(parsed[m["id"]].date or header(m["text"])["date"]) for m in new if m["id"] in parsed])
         for m in new:
             pm = parsed.get(m["id"])
             if pm is None:
@@ -133,7 +148,7 @@ def process(text, source="input"):
             m.update(sender=pm.frm, role=pm.role, date=pm.date)
             if pm.inj:
                 report["notes"].append(f"{m['id']}: contains instructions to the system; ignored as instructions")
-            if not pm.rel or not pm.it:
+            if not pm.it:   # facts extracted = relevant, even if the model also set rel=false (never drop them)
                 m["status"], m["reason"] = "irrelevant", "no planning facts"
                 continue
             for it in pm.it:
@@ -143,7 +158,7 @@ def process(text, source="input"):
                         "a": it.a, "e": it.e, "k": it.k, "v": it.v, "u": it.u, "t": it.t, "h": it.h,
                         "q": it.q, "c": it.c, "status": "", "reason": "", "locked": False,
                         # full run: chronological by stated date; update: arrives after everything known
-                        "order": _order_key(pm.date, state["next_order"]) if mode == "full"
+                        "order": _order_key(pm.date, state["next_order"], latest) if mode == "full"
                         else 20_000 + state["next_order"]}
                 _normalize(item)
                 if item["k"] == "rule" or item["t"] == "rule":
@@ -223,6 +238,14 @@ def _normalize(item):
         item["k"] = "requires_feature"           # a demanded facility, not a property of one venue
 
 
+def _hard_requirement(item):
+    """A stated must-have (rule or required facility). In a full run it is never dropped to make the plan pass:
+    if nothing satisfies it the plan must say so (INVALID / NEEDS CLARIFICATION), not hide it."""
+    # only from senders with authority over the event; a "rule" read from e.g. a vendor's notice can still be rejected
+    return bool(item.get("h")) and (item["t"] == "rule" or item["k"] in ("rule", "requires_feature")) and \
+        config.AUTHORITY.get(item["role"], 0) >= config.AUTHORITY["organizer"]
+
+
 def _transaction(state, new_items, mode, report):
     old_plan = state["plan"]
     old_valid = old_plan is not None and old_plan["validation"]["status"] == "VALID"
@@ -234,7 +257,8 @@ def _transaction(state, new_items, mode, report):
     # Try to make the plan valid by rejecting new items that break checks (latest first).
     if plan["validation"]["status"] == "INVALID":
         for it in sorted([i for i in items if i["id"] in new_ids and i["t"] not in NOT_FACT_KINDS
-                          and i["status"] == "accepted"], key=lambda x: -x["order"]):
+                          and i["status"] == "accepted" and not (mode == "full" and _hard_requirement(i))],
+                         key=lambda x: -x["order"]):
             before = _failing(plan) - baseline_fail if mode == "update" else _failing(plan)
             it["locked"], it["status"] = True, "rejected"
             resolve(items)

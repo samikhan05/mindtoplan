@@ -150,7 +150,7 @@ def test_unexpressed_rule_gets_one_area_tagged_call(script, monkeypatch):
                                 "q": "hall must hold no more than 150 people"}], False)
     calls = []
 
-    def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0):
+    def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0, attempts=1):
         budgeter.calls += 1
         calls.append(area)
         return {"m": "headcount", "op": "lte", "v": 150}
@@ -298,3 +298,50 @@ def test_broken_fallback_goes_back_to_primary(monkeypatch):
     assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") is None
     assert seen == ["primary", "backup", "primary"]      # 3 attempts, the last one back on the primary
     assert "retrying primary" in t.records[1]["error"]
+
+
+def test_order_key_handles_new_year():
+    latest = pipeline._latest_month(["20 Dec", "5 Jan", "28 Dec"])
+    assert latest == 12
+    assert pipeline._order_key("5 Jan", 0, latest) > pipeline._order_key("20 Dec", 1, latest)
+    # no wrap inside one season: March stays before April
+    assert pipeline._order_key("3 Mar", 0, 4) < pipeline._order_key("2 Apr", 1, 4)
+    assert pipeline._order_key("", 7, 12) == 10_007
+
+
+def test_totals_keep_partial_usage_and_count_retries():
+    base = {"area": "reading", "ok": True, "attempt": 1}
+    t = Trace([{**base, "input_tokens": 100, "output_tokens": 20, "total_tokens": None},       # no total sent
+               {**base, "input_tokens": None, "output_tokens": None, "total_tokens": None, "ok": False},
+               {**base, "area": "venue", "attempt": 2, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                "cached_input_tokens": 4}]).totals()
+    assert t["input"] == 110 and t["output"] == 25 and t["total"] == 135
+    assert t["unavailable"] == 1 and t["failed"] == 1 and t["retries"] == 1 and t["cached_input"] == 4
+    assert t["by_area"] == {"reading": 120, "venue": 15}
+
+
+def test_duplicate_message_in_one_file_is_read_once(script):
+    state, rep = pipeline.process("PACK all facts\n\nsame note twice\n\nsame note twice")
+    assert rep["new_messages"] == ["M1", "M2"]
+    assert any("duplicate" in n for n in rep["notes"])
+
+
+def test_full_run_never_drops_an_unmeetable_hard_requirement(script):
+    # the pack itself demands a facility no listed venue has: the plan must not claim VALID by rejecting it
+    script["need helipad"] = ("Registrar", "institution",
+                              [{"a": "venue", "e": "need", "k": "requires_feature", "v": "helipad", "t": "rule",
+                                "h": True, "q": "venue must have a helipad"}], False)
+    state, rep = pipeline.process("PACK all facts\n\nneed helipad on site")
+    req = [i for i in state["items"] if i["k"] == "requires_feature"][0]
+    assert req["status"] != "rejected"
+    assert state["plan"]["validation"]["status"] != "VALID"
+
+
+def test_full_run_may_reject_unmeetable_rule_from_a_vendor_notice(script):
+    # a model can misread a vendor's notice as a requirement; that one may still be rejected to keep the plan valid
+    script["closes early"] = ("Library", "vendor",
+                              [{"a": "venue", "e": "need", "k": "requires_feature", "v": "helipad", "t": "rule",
+                                "h": True, "q": "library closes early"}], False)
+    state, rep = pipeline.process("PACK all facts\n\nlibrary closes early on friday")
+    req = [i for i in state["items"] if i["k"] == "requires_feature"][0]
+    assert req["status"] == "rejected" and state["plan"]["validation"]["status"] == "VALID"

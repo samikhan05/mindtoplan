@@ -134,7 +134,7 @@ Any other requirement: k=rule, t=rule, h=true, q=the requirement, and if possibl
 Requests, ideas and quotes that nobody approved are t=suggestion. A changed price or number is t=update with the same e and k as before. Mixed Roman Urdu/English is normal: read meaning (ab=now, pehle=before, hoga=will be, wala=one/option, hai=is)."""
 
 
-_HDR = {k: re.compile(rf"(?:^|[|\n])\s*{k}\s*:\s*([^|\n]+)", re.I) for k in ("from", "date")}
+_HDR = {k: re.compile(rf"\b{k}\s*:\s*([^|\n]+)", re.I) for k in ("from", "date")}
 
 
 def header(text):
@@ -146,12 +146,68 @@ def header(text):
     return out
 
 
+# which area each vocabulary key belongs to (from the prompt's own key list; used only to repair a reply)
+KEY_AREA = {**{k: "event" for k in ("students", "team_size", "staff", "duration_min", "budget_total", "start_time",
+                                    "location")},
+            **{k: "venue" for k in ("capacity", "price", "feature", "lacks_feature", "unavailable", "requires_feature")},
+            **{k: "schedule" for k in ("break_min", "activity_min", "at_time")},
+            **{k: "food" for k in ("price_per_head", "delivery_fee", "tier", "order_qty", "diet_count")},
+            **{k: "judging" for k in ("judges_available", "honorarium", "minutes_per_team", "max_teams_per_judge",
+                                      "late_min", "judges_leaving_early")},
+            **{k: "budget" for k in ("expense", "optional_cost", "cost_per_team", "cost_per_student",
+                                     "cost_per_person", "cost_per_judge", "percent_charge", "reserve_pct")}}
+ITEM_KEYS = ("a", "e", "k", "v", "u", "t", "h", "q", "c")
+
+
+def _repair(out, msgs):
+    """Generic fixes for common reply-shape slips, so one slip does not lose a whole message:
+    facts flattened to the message level are regrouped under their message; a record without "id" takes the id at
+    its position when the reply has one record per message; a missing/unknown area is taken from the key."""
+    recs = out.get("m") if isinstance(out, dict) else None
+    if not isinstance(recs, list):
+        return out
+    merged, ids = {}, [m["id"] for m in msgs]
+    for i, r in enumerate(recs):
+        if not isinstance(r, dict):
+            continue
+        rid = str(r.get("id") or "")
+        if rid not in ids:
+            # a missing or foreign id (e.g. "1" from the pack's own numbering): one record per message maps by
+            # position; otherwise a bare number n maps to the n-th message of this batch
+            digits = re.sub(r"\D", "", rid)
+            if len(recs) == len(msgs):
+                rid = ids[i]
+            elif digits and 1 <= int(digits) <= len(ids):
+                rid = ids[int(digits) - 1]
+            else:
+                continue
+        r["id"] = rid
+        m = merged.setdefault(r["id"], {"it": []})
+        for k, v in r.items():
+            if k not in ITEM_KEYS and k != "it":
+                m.setdefault(k, v)
+        if "k" in r and "it" not in r:
+            m["it"].append({k: v for k, v in r.items() if k in ITEM_KEYS})
+        else:
+            m["it"].extend(r.get("it") or [])
+    for m in merged.values():
+        for it in m["it"]:
+            if isinstance(it, dict) and it.get("a") not in set(KEY_AREA.values()) and it.get("k") in KEY_AREA:
+                it["a"] = KEY_AREA[it["k"]]
+    out["m"] = list(merged.values())
+    return out
+
+
 def read_messages(msgs, known_entities, budgeter, trace, update_id):
     """msgs: list of {id, text}. Returns dict id -> Msg (validated) or None if the call failed."""
     body = "\n".join(f'<msg id="{m["id"]}">\n{m["text"]}\n</msg>' for m in msgs)
-    if known_entities:
+    if known_entities:   # grouped by area: same names, fewer tokens than repeating "area:" per name
+        groups = {}
+        for ke in known_entities:
+            a, _, e = ke.partition(":")
+            groups.setdefault(a, []).append(e)
         body = "Entities already known (reuse these names for the same things): " + \
-               "; ".join(known_entities) + "\n" + body
+               "; ".join(f"{a}: {', '.join(es)}" for a, es in groups.items()) + "\n" + body
     out = call_model(budgeter, trace, "reading", SYSTEM, body, [m["id"] for m in msgs], update_id,
                      max_tokens=4000)
     if out is None:
@@ -161,6 +217,7 @@ def read_messages(msgs, known_entities, budgeter, trace, update_id):
     if isinstance(out, dict) and len(out.get("m") or []) == 1 and isinstance(out["m"][0], dict) \
             and "m" in out["m"][0] and "id" not in out["m"][0]:
         out = out["m"][0]              # {"m":[{"m":[...]}]}: one nesting level too deep
+    out = _repair(out, msgs)
     try:
         parsed = ReadOut.model_validate(out)
     except ValidationError as e:

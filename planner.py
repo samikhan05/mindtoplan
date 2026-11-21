@@ -94,8 +94,8 @@ def food_options(v):
     general_fee = max(general) if general else 0
     out = []
     for key, o in opts.items():
-        if "price_per_head" not in o:
-            continue
+        if "price_per_head" not in o or num(o["price_per_head"]["v"]) is None:
+            continue   # no readable price: cannot be planned (and must not crash the run)
         tier = norm(o["tier"]["v"]) if "tier" in o else ""
         out.append({"name": o["_name"], "pph": num(o["price_per_head"]["v"]),
                     "delivery": num(o["delivery_fee"]["v"]) if "delivery_fee" in o else general_fee,
