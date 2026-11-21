@@ -8,6 +8,9 @@ from llm import ConfigError
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):   # piped/redirected output on Windows defaults to cp1252: "→" would crash
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     if len(sys.argv) != 2:
         sys.exit("usage: python plan.py <messages.txt>")
     path = Path(sys.argv[1])

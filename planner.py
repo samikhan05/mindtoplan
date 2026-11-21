@@ -94,11 +94,12 @@ def food_options(v):
     general_fee = max(general) if general else 0
     out = []
     for key, o in opts.items():
-        if "price_per_head" not in o:
-            continue
+        if "price_per_head" not in o or num(o["price_per_head"]["v"]) is None:
+            continue   # no readable price: cannot be planned (and must not crash the run)
         tier = norm(o["tier"]["v"]) if "tier" in o else ""
         out.append({"name": o["_name"], "pph": num(o["price_per_head"]["v"]),
                     "delivery": num(o["delivery_fee"]["v"]) if "delivery_fee" in o else general_fee,
+                    "delivery_stated": "delivery_fee" in o or bool(general),
                     "tier": tier, "evidence": ev(o["price_per_head"])})
     # preference: the standard option first, then cheaper ones (fallback when budget fails)
     # untagged options: fuller (pricier) meal first; build_plan falls back to cheaper ones if the budget fails
@@ -142,8 +143,15 @@ def schedule_plan(v, d):
     start = clock(st["v"]) if st else None
     if start is None:
         st, start = None, 0
-    anchors = [(f, anchor_spec(f["v"])) for f in v.all("at_time")]
-    issues = {"fail": [], "unresolved": []}
+    issues = {"fail": [], "unresolved": [], "notes": []}
+    anchors = []
+    names = [n for n, m, _ in seq if m > 0 and not n.startswith("Hacking")]
+    for f in v.all("at_time"):
+        if any(_words(n) & _words(f["e"]) for n in names):
+            anchors.append((f, anchor_spec(f["v"])))
+        else:   # e.g. "the library closes at 3 pm": a time, but not of any block of this event's schedule
+            issues["notes"].append(f"time for '{f['e']}' ({f['v']}, {f['msg']}) is not a block of this event's "
+                                   "schedule; not used (shown for review)")
     needs_clock = any(sp is None or not sp["offset"] for _, sp in anchors)
     if anchors and (st or not needs_clock):
         blocks, hacking = _anchored(seq, anchors, start, total, issues)
@@ -218,6 +226,8 @@ def _anchored(seq, anchors, start, total, issues):
     end = start + total
     items = [{"name": n, "min": m, "f": f} for n, m, f in seq if m > 0 and not n.startswith("Hacking")]
     for f, sp in anchors:
+        if sp is None and not any(ch.isdigit() for ch in str(f["v"])):
+            continue   # no clock time at all (e.g. a format placeholder echoed by the model): nothing to pin
         hit = next((it for it in items if _words(it["name"]) & _words(f["e"])), None)
         if hit is None:
             issues["unresolved"].append(f"time for '{f['e']}' ({f['v']}) matches no schedule block")
@@ -422,6 +432,8 @@ def assemble(v, d, venue, venues_ok, venues_rej, needs, food, qty_f):
                 diet_issues.append(f"{n} {f['e']} meals needed but no {f['e']} option was quoted")
             elif n:
                 splits.append({"diet": f["e"], "qty": n, "name": opt["name"], "pph": opt["pph"], "evidence": ev(f)})
+        if not food.get("delivery_stated", True):
+            dd["assumptions"].append("food delivery Rs 0 (no delivery charge stated in messages; planning default)")
         main_qty = max(qty - sum(s["qty"] for s in splits), 0)
         cost = main_qty * food["pph"] + sum(s["qty"] * s["pph"] for s in splits) + (food["delivery"] or 0)
         food_sec = {**food, "qty": qty, "main_qty": main_qty, "splits": splits, "diet_issues": diet_issues,

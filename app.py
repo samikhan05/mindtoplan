@@ -28,14 +28,21 @@ def html(s):
 
 
 def run(text, source):
+    """Returns True when the run finished cleanly (caller reruns); on failure the error stays on screen."""
     try:
         with st.status("Processing…", expanded=False) as s:
-            _, rep = process(text, source)
+            st_, rep = process(text, source)
             s.update(label=f"Done · {rep['calls']} model call(s) · {rep['tokens']['total']:,} tokens · {rep['seconds']} s",
                      state="complete")
         st.session_state["last"] = rep
     except ConfigError as err:
         st.error(f"Config error: {err}")
+        return False
+    errors = [r["error"] for r in st_["trace"][len(st_["trace"]) - rep["calls"]:] if r.get("error")]
+    if rep["incomplete"] or errors:
+        st.error("Run incomplete; previous plan kept.\n\n" + "\n\n".join(dict.fromkeys(errors + rep["notes"])))
+        return False
+    return True
 
 
 def src(ev):
@@ -78,8 +85,8 @@ with st.sidebar:
     html('<div class="slabel">Active step / controls</div>')
     up = st.file_uploader("Load message pack or new messages (.txt)", type=["txt"])
     if up and st.button("Process file", type="primary", width="stretch"):
-        run(up.getvalue().decode("utf-8-sig"), up.name)
-        st.rerun()
+        if run(up.getvalue().decode("utf-8-sig"), up.name):
+            st.rerun()
     if state and state.get("plan"):
         st.download_button("Download submission.txt", submission_text(state), "submission.txt", type="primary",
                            width="stretch", help="Final plan + full trace, for the upload form")
@@ -345,8 +352,8 @@ with tabs[4]:
                "the pack. Prediction: only the reading step calls the model; Python re-plans the affected areas.")
     new = st.text_area("New message(s)", height=120, placeholder="Paste the message text exactly as received")
     if st.button("Process update", type="primary", disabled=not new.strip()):
-        run(new, "ui")
-        st.rerun()
+        if run(new, "ui"):
+            st.rerun()
     if last["mode"] == "update":
         before, after = key_numbers(state.get("previous_plan")), key_numbers(plan)
         rows = [(k, before.get(k), after[k]) for k in after if before.get(k) != after[k]]

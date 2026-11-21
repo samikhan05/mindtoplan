@@ -1,0 +1,2 @@
+From: Judging lead (email) | Date: 10 Jan
+Change: each judge can now cover at most 3 teams.

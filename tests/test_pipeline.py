@@ -131,8 +131,9 @@ def test_failed_call_recorded_and_totals_from_usage(monkeypatch):
     monkeypatch.setattr(openai, "OpenAI", Boom)
     t = Trace()
     assert llm.call_model(Budgeter("update"), t, "food", "s", "u", ["M1"], "U1") is None
-    assert len(t.records) == 2 and all(not r["ok"] and r["total_tokens"] is None for r in t.records)
-    assert t.totals()["unavailable"] == 2 and t.totals()["total"] == 0
+    n = llm.MAX_ATTEMPTS
+    assert len(t.records) == n and all(not r["ok"] and r["total_tokens"] is None for r in t.records)
+    assert t.totals()["unavailable"] == n and t.totals()["total"] == 0
     t.records.append({**t.records[0], "input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
     assert t.totals()["total"] == 10
 
@@ -146,10 +147,10 @@ def test_unexpressed_rule_gets_one_area_tagged_call(script, monkeypatch):
     pipeline.process("PACK all facts")
     script["no more than"] = ("Registrar", "institution",
                               [{"a": "venue", "e": "", "k": "rule", "t": "rule", "h": True,
-                                "q": "hall must hold no more than 150 people"}], False)
+                                "q": "the hall must feel spacious for every team"}], False)
     calls = []
 
-    def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0):
+    def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0, **kw):
         budgeter.calls += 1
         calls.append(area)
         return {"m": "headcount", "op": "lte", "v": 150}
@@ -235,3 +236,112 @@ def test_hard_flagged_venue_feature_is_not_a_requirement(script):
     state, _ = pipeline.process("PACK all facts")
     assert state["plan"]["venue"]["required_features"] == []
     assert state["plan"]["validation"]["status"] == "VALID"
+
+
+class _StatusError(Exception):
+    def __init__(self, status):
+        super().__init__(f"Error code: {status}")
+        self.status_code = status
+
+
+def _fake_clients(monkeypatch, behaviour):
+    """behaviour: model name -> status code to raise, or None to answer {"ok": true}."""
+    from types import SimpleNamespace as NS
+    seen = []
+
+    def make(timeout, route=None):
+        base, model, key = route or llm._routes()[0]
+
+        def create(**kw):
+            seen.append(model)
+            if behaviour[model]:
+                raise _StatusError(behaviour[model])
+            return NS(model=model, usage=NS(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+                      choices=[NS(message=NS(content='{"ok": true}'))])
+        return NS(chat=NS(completions=NS(create=create)))
+    monkeypatch.setattr(llm, "_client", make)
+    return seen
+
+
+def test_overloaded_primary_retries_once_on_fallback(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "k"); monkeypatch.setattr(config, "BASE_URL", "http://a")
+    monkeypatch.setattr(config, "MODEL_NAME", "primary")
+    monkeypatch.setattr(config, "FALLBACK_BASE_URL", "http://b"); monkeypatch.setattr(config, "FALLBACK_API_KEY", "k2")
+    monkeypatch.setattr(config, "FALLBACK_MODEL_NAME", "backup")
+    seen = _fake_clients(monkeypatch, {"primary": 503, "backup": None})
+    t = Trace()
+    assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") == {"ok": True}
+    assert seen == ["primary", "backup"]
+    assert [r["model"] for r in t.records] == ["primary", "backup"] and [r["ok"] for r in t.records] == [False, True]
+    assert "fallback" in t.records[0]["error"]
+
+
+def test_bad_request_is_not_retried(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "k"); monkeypatch.setattr(config, "BASE_URL", "http://a")
+    monkeypatch.setattr(config, "MODEL_NAME", "primary")
+    seen = _fake_clients(monkeypatch, {"primary": 400})
+    t = Trace()
+    b = Budgeter("update")
+    assert llm.call_model(b, t, "reading", "s", "u", ["M1"], "U1") is None
+    assert seen == ["primary"] and b.calls == 1 and "not retried" in t.records[0]["error"]
+
+
+def test_broken_fallback_goes_back_to_primary(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "k"); monkeypatch.setattr(config, "BASE_URL", "http://a")
+    monkeypatch.setattr(config, "MODEL_NAME", "primary")
+    monkeypatch.setattr(config, "FALLBACK_BASE_URL", "http://b"); monkeypatch.setattr(config, "FALLBACK_API_KEY", "bad")
+    monkeypatch.setattr(config, "FALLBACK_MODEL_NAME", "backup")
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+    seen = _fake_clients(monkeypatch, {"primary": 503, "backup": 401})
+    t = Trace()
+    assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") is None
+    assert seen == ["primary", "backup", "primary", "primary"]   # backup dropped; overload gets a patient 4th try
+    assert "retrying primary" in t.records[1]["error"]
+
+
+def test_order_key_handles_new_year():
+    latest = pipeline._latest_month(["20 Dec", "5 Jan", "28 Dec"])
+    assert latest == 12
+    assert pipeline._order_key("5 Jan", 0, latest) > pipeline._order_key("20 Dec", 1, latest)
+    # no wrap inside one season: March stays before April
+    assert pipeline._order_key("3 Mar", 0, 4) < pipeline._order_key("2 Apr", 1, 4)
+    assert pipeline._order_key("", 7, 12) == 10_007
+
+
+def test_totals_keep_partial_usage_and_count_retries():
+    base = {"area": "reading", "ok": True, "attempt": 1}
+    t = Trace([{**base, "input_tokens": 100, "output_tokens": 20, "total_tokens": None},       # no total sent
+               {**base, "input_tokens": None, "output_tokens": None, "total_tokens": None, "ok": False},
+               {**base, "area": "venue", "attempt": 2, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                "cached_input_tokens": 4}]).totals()
+    assert t["input"] == 110 and t["output"] == 25 and t["total"] == 135
+    assert t["unavailable"] == 1 and t["failed"] == 1 and t["retries"] == 1 and t["cached_input"] == 4
+    assert t["by_area"] == {"reading": 120, "venue": 15}
+
+
+def test_duplicate_message_in_one_file_is_read_once(script):
+    state, rep = pipeline.process("PACK all facts\n\nsame note twice\n\nsame note twice")
+    assert rep["new_messages"] == ["M1", "M2"]
+    assert any("duplicate" in n for n in rep["notes"])
+
+
+def test_full_run_never_drops_an_unmeetable_hard_requirement(script):
+    # the pack itself demands a facility no listed venue has: the plan must not claim VALID by rejecting it
+    script["need helipad"] = ("Registrar", "institution",
+                              [{"a": "venue", "e": "need", "k": "requires_feature", "v": "helipad", "t": "rule",
+                                "h": True, "q": "venue must have a helipad"}], False)
+    state, rep = pipeline.process("PACK all facts\n\nneed helipad on site")
+    req = [i for i in state["items"] if i["k"] == "requires_feature"][0]
+    assert req["status"] != "rejected"
+    assert state["plan"]["validation"]["status"] != "VALID"
+
+
+def test_full_run_may_reject_unmeetable_rule_from_a_vendor_notice(script):
+    # a model can misread a vendor's notice as a requirement; that one may still be rejected to keep the plan valid
+    script["closes early"] = ("Library", "vendor",
+                              [{"a": "venue", "e": "need", "k": "requires_feature", "v": "helipad", "t": "rule",
+                                "h": True, "q": "library closes early"}], False)
+    state, rep = pipeline.process("PACK all facts\n\nlibrary closes early on friday")
+    req = [i for i in state["items"] if i["k"] == "requires_feature"][0]
+    assert req["status"] == "rejected" and state["plan"]["validation"]["status"] == "VALID"

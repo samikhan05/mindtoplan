@@ -43,6 +43,8 @@ def plan_text(state):
     L += ["", "SCHEDULE"]
     for blk in s["blocks"]:
         L.append(f"  {blk['time']:<16} {blk['name']} ({blk['min']} min)")
+    for n in (s.get("issues") or {}).get("notes", []):
+        L.append(f"  note: {n}")
     L += ["", "FOOD"]
     f = p["food"]
     if f:
@@ -102,13 +104,48 @@ def plan_text(state):
     return "\n".join(L) + "\n"
 
 
+def _tok(r):
+    """One call's provider-reported usage; partial usage is shown as reported, never estimated."""
+    if all(r.get(k) is None for k in ("input_tokens", "output_tokens", "total_tokens")):
+        return "tokens: unavailable (provider reported none)"
+    show = lambda v: "n/a" if v is None else v
+    extra = f" (cached input {r['cached_input_tokens']})" if r.get("cached_input_tokens") else ""
+    note = f" [{r['usage_note']}]" if r.get("usage_note") else ""
+    return (f"in={show(r.get('input_tokens'))} out={show(r.get('output_tokens'))} "
+            f"total={show(r.get('total_tokens'))}{extra}{note}")
+
+
+def _totals_line(t, label="model calls"):
+    parts = [f"TOTAL: {t['calls']} {label} | input {t['input']} | output {t['output']} | total {t['total']} tokens"]
+    if t["failed"]:
+        parts.append(f"{t['failed']} failed")
+    if t["retries"]:
+        parts.append(f"{t['retries']} retries (counted above)")
+    if t["unavailable"]:
+        parts.append(f"{t['unavailable']} calls with usage unavailable (not counted as 0)")
+    if t["cached_input"]:
+        parts.append(f"{t['cached_input']} input tokens served from provider cache")
+    if t["by_area"]:
+        parts.append("by area: " + ", ".join(f"{a} {n}" for a, n in sorted(t["by_area"].items())))
+    return " | ".join(parts)
+
+
+def _per_update(state):
+    from llm import Trace
+    out = []
+    for u in state["updates"]:
+        t = Trace([r for r in state["trace"] if r["update_id"] == u["update_id"]]).totals()
+        out.append(f"  {u['update_id']:5} ({u['mode']}): {t['calls']} calls, input {t['input']}, output {t['output']}, "
+                   f"total {t['total']} tokens, {u['seconds']} s" + (f", {t['failed']} failed" if t["failed"] else ""))
+    return out
+
+
 def trace_text(state):
     from llm import Trace
     recs = state["trace"]
     L = [f"TRACE — {model_list_note()}", "=" * 60]
     for r in recs:
-        tok = (f"in={r['input_tokens']} out={r['output_tokens']} total={r['total_tokens']}"
-               if r["total_tokens"] is not None else "tokens: unavailable")
+        tok = _tok(r)
         L += [f"#{r['n']} [{r['area']}] model={r['model']} {r['timestamp']} {r['duration_s']}s "
               f"{'OK' if r['ok'] else 'FAILED'} update={r['update_id']} msgs={','.join(r['message_ids'])} {tok}",
               "--- input (system) ---", r["input"]["system"], "--- input (user) ---", r["input"]["user"],
@@ -145,12 +182,10 @@ def trace_summary(state):
     purpose = {"reading": "reading messages"}
     L = ["TRACE SUMMARY (one line per AI call)", "=" * 60]
     for r in state["trace"]:
-        tok = (f"in {r['input_tokens']} / out {r['output_tokens']} / total {r['total_tokens']} tokens"
-               if r["total_tokens"] is not None else "tokens: unavailable (provider reported none)")
+        tok = _tok(r)
         L.append(f"Call {r['n']:>2} | model {r['model']} | for: {purpose.get(r['area'], r['area'])} "
                  f"[{r['area']}] | {tok} | {'ok' if r['ok'] else 'FAILED: ' + (r['error'] or '')[:60]}")
-    t = Trace(state["trace"]).totals()
-    L.append(f"TOTAL: {t['calls']} AI calls | input {t['input']} | output {t['output']} | total {t['total']} tokens")
+    L.append(_totals_line(Trace(state["trace"]).totals(), "AI calls"))
     return "\n".join(L) + "\n"
 
 
@@ -203,4 +238,5 @@ def print_run(state, report):
               f"total {rt['total']} tokens | {report['seconds']} s[/bold]")
     con.print(f"[bold]All runs: {at['calls']} model calls | input {at['input']} | output {at['output']} | "
               f"total {at['total']} tokens[/bold]"
-              + (f" | usage unavailable on {at['unavailable']} calls" if at["unavailable"] else ""))
+              + (f" | usage unavailable on {at['unavailable']} calls" if at["unavailable"] else "")
+              + (f" | {at['retries']} retries, {at['failed']} failed" if at["failed"] or at["retries"] else ""))

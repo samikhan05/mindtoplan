@@ -56,3 +56,41 @@ def test_numbered_list_inside_blank_line_pack_not_split():
     t = "Dean: budget Rs 9.\n\nAccounts: ordered\n1. cups Rs 5\n2. pens Rs 6\n\nHall: seats 50."
     out = split_messages(t)
     assert len(out) == 3 and "pens" in out[1]
+
+
+def test_header_labels_in_any_layout():
+    import reader
+    assert reader.header("[1] From: Dean's office (email) | Date: 5 Jan\nFinal approval")["from"] == "Dean's office (email)"
+    assert reader.header("#2 | From: Caterer, WhatsApp | Date: 12 Nov")["date"] == "12 Nov"
+    assert reader.header("lunch ab 900 ka hai") == {"from": "", "date": ""}
+
+
+def test_repair_regroups_flattened_facts_and_fills_ids():
+    import reader
+    msgs = [{"id": "M1"}, {"id": "M2"}]
+    out = {"m": [{"role": "institution", "it": [{"a": "event", "k": "students", "v": 90}]},
+                 {"id": "M2", "role": "vendor", "e": "Hall B", "k": "capacity", "v": 240},
+                 {"id": "M2", "role": "vendor", "e": "Hall B", "k": "price", "v": 180000}]}
+    fixed = reader._repair(out, msgs)
+    by = {m["id"]: m for m in fixed["m"]}
+    assert set(by) == {"M2"} or set(by) == {"M1", "M2"}
+    assert [i["k"] for i in by["M2"]["it"]] == ["capacity", "price"] and by["M2"]["it"][0]["a"] == "venue"
+    # one record per message: the id-less record takes its position's id
+    out2 = {"m": [{"role": "institution", "it": [{"k": "students", "v": 90}]}, {"id": "M2", "it": []}]}
+    by2 = {m["id"]: m for m in reader._repair(out2, msgs)["m"]}
+    assert by2["M1"]["it"][0]["a"] == "event"
+
+
+def test_repair_maps_pack_numbering_ids():
+    import reader
+    msgs = [{"id": "M1"}, {"id": "M2"}]
+    out = {"m": [{"id": "1", "it": [{"k": "students", "v": 90}]}, {"id": "2", "it": [{"k": "capacity", "v": 9}]}]}
+    assert [m["id"] for m in reader._repair(out, msgs)["m"]] == ["M1", "M2"]
+
+
+def test_food_option_without_readable_price_is_skipped():
+    from conftest import item
+    from facts import View, resolve
+    from planner import food_options
+    items = resolve([item("food", "price_per_head", 700, e="karahi box"), item("food", "price_per_head", "TBD", e="veg box")])
+    assert [o["name"] for o in food_options(View(items))] == ["karahi box"]

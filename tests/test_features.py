@@ -70,6 +70,14 @@ def test_clock_anchor_outside_event_fails():
     assert check(p, "schedule valid")["result"] == "FAIL"
 
 
+def test_time_without_any_digits_is_ignored_not_unresolved():
+    # a model can echo the format placeholder ("+N minutes after event start") when no time was stated
+    p = plan_of([item("event", "start_time", "10:00"),
+                 item("schedule", "at_time", "+N minutes after event start", e="tea break")])
+    assert check(p, "schedule valid")["result"] == "PASS"
+    assert p["validation"]["status"] == "VALID"
+
+
 def test_clock_anchor_without_start_time_needs_clarification():
     p = plan_of([item("schedule", "at_time", "13:30", e="tea break")])
     assert check(p, "schedule valid")["result"] == "UNRESOLVED"

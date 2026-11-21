@@ -65,6 +65,11 @@ def resolve(items):
             f["reason"] = (f"'{f['sender']}' only requests/claims a change to {f['k']} ({f['v']}); "
                            "not a confirmed fact, so the plan keeps the current value")
             continue
+        if f.get("unauthorized_requirement"):
+            f["status"] = "needs review"
+            f["reason"] = (f"requirement from '{f['sender']}' ({f['role']}), who has no authority over the event: "
+                           "not applied; review it")
+            continue
         if f["t"] in NOT_FACT_KINDS:
             f["status"] = "optional" if f["k"] == "optional_cost" else "noted"
             f["reason"] = {"suggestion": "a request/quote, not approved: never counted as spending",
@@ -134,7 +139,8 @@ class View:
 # generic facility vocabulary: different words for the same facility (no pack facts)
 FACILITY_GROUPS = [
     {"step free", "stepfree", "step-free", "ramp", "wheelchair", "ground floor", "accessible", "accessibility",
-     "lift", "elevator", "barrier free", "disabled access"},
+     "lift", "elevator", "barrier free", "disabled access", "no stairs", "without stairs", "stair free",
+     "stairless", "level access", "no steps"},
     {"generator", "backup power", "power backup", "standby power", "ups"},
     {"projector", "screen", "multimedia", "display"},
     {"air conditioning", "air conditioned", "ac", "a c", "cooling"},

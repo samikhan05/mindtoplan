@@ -8,10 +8,12 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-from facts import NOT_FACT_KINDS, num, parse_date, resolve
+from facts import NOT_FACT_KINDS, norm, num, parse_date, resolve
 from llm import Budgeter, Trace, call_model
 from planner import build_plan
-from reader import METRICS, read_messages, split_messages, text_hash
+from reader import METRICS, header, read_messages, split_messages, text_hash
+from rulefit import python_rule
+from valuefix import missing, recover
 from validate import checkable
 
 AREAS = ("venue", "schedule", "food", "judging", "budget")
@@ -60,9 +62,19 @@ def new_state():
     return {"messages": [], "items": [], "plan": None, "trace": [], "updates": [], "next_order": 0}
 
 
-def _order_key(date_str, seq):
+def _order_key(date_str, seq, latest_month=None):
+    """Chronological key from a year-less date. Dates have no year, so when a pack spans a new year
+    (latest month Dec, some messages in Jan) a month more than 6 before the latest counts as next year."""
     d = parse_date(date_str)
-    return (d[0] * 100 + d[1]) if d else 10_000 + seq
+    if not d:
+        return 10_000 + seq
+    month = d[0] + 12 if latest_month and latest_month - d[0] > 6 else d[0]
+    return month * 100 + d[1]
+
+
+def _latest_month(dates):
+    months = [d[0] for d in map(parse_date, dates) if d]
+    return max(months) if months else None
 
 
 def _rule_fallback(item, budgeter, trace, update_id):
@@ -70,8 +82,63 @@ def _rule_fallback(item, budgeter, trace, update_id):
     area = item["a"] if item["a"] in AREAS else "budget"
     system = ('Turn the requirement into JSON {"m":metric,"op":"eq|ne|lt|lte|gt|gte|requires|excludes|within",'
               '"v":value} using ONLY a metric from: ' + METRICS + '. Minutes for times. If impossible return {"m":null}.')
-    out = call_model(budgeter, trace, area, system, item["q"], [item["msg"]], update_id, max_tokens=80)
-    return out if out and out.get("m") else None
+    out = call_model(budgeter, trace, area, system, item["q"], [item["msg"]], update_id, max_tokens=120,
+                     attempts=2, expect=dict)   # small optional call: one retry at most
+    # anything but a usable {"m": ...} object leaves the rule as it was (no checkable form): it is kept and shows
+    # as UNRESOLVED, so the plan reads NEEDS CLARIFICATION instead of the requirement disappearing
+    return out if isinstance(out, dict) and out.get("m") else None
+
+
+RECHECK_SYSTEM = ('Each listed fact was read without its value. Read ONLY the given message(s). Return JSON '
+                  '{"v":{"<fact id>":value}}: a plain number (money in rupees, durations in minutes) or "HH:MM" for a '
+                  'time; null if the message does not state it. Copy what is written; do not compute or guess.')
+
+
+def _recheck_missing(items, msgs, budgeter, trace, update_id, report):
+    """Targeted verification: only the facts Python found incomplete, with only their own messages.
+    A returned value is used only if that number/time is actually written in the message (no invented values)."""
+    from valuefix import accepts
+    text = {m["id"]: m["text"] for m in msgs}
+    ids = sorted({i["msg"] for i in items}, key=lambda x: int(x[1:]))
+    user = "\n".join(f'<msg id="{mid}">\n{text[mid]}\n</msg>' for mid in ids) + "\nMissing values:\n" + \
+        "\n".join(f'{i["id"]}: {i["k"]} of "{i["e"] or i["a"]}"' for i in items)
+    out = call_model(budgeter, trace, "reading", RECHECK_SYSTEM, user, ids, update_id,
+                     max_tokens=40 + 20 * len(items), attempts=2, expect=dict)
+    vals = out.get("v") if isinstance(out, dict) and isinstance(out.get("v"), dict) else {}
+    for it in items:
+        val = vals.get(it["id"])
+        if val is None:
+            _hold(it, "no value even after the targeted re-check", report)
+            continue
+        ok = accepts(it, val, text[it["msg"]])
+        if ok is None:
+            _hold(it, f"re-check answer {val!r} is not written in {it['msg']}; ignored", report)
+            continue
+        it["v_model"], it["v"], it["v_source"] = it["v"], ok, "targeted re-check (model, verified in text)"
+        report["notes"].append(f"{it['id']}: {it['k']} {ok} filled by targeted re-check")
+
+
+ORG_SENDER = re.compile(r"\b(office|department|dept|registrar|dean|directorate|administration|faculty|"
+                        r"university|college|ministry|authority)\b", re.I)
+
+
+def _sender_role(role, sender, report, msg_id):
+    """The model's role, unless the sender's own name denotes an organisation unit and the model called it an
+    individual/student (e.g. 'Student disability office' read as 'student'). Only upgrades to institution."""
+    role = role if role in config.AUTHORITY else "unknown"
+    if role in ("student", "individual", "unknown") and ORG_SENDER.search(sender or ""):
+        if not any(msg_id in n and "treated as institution" in n for n in report["notes"]):
+            report["notes"].append(f"{msg_id}: sender '{sender}' names an office/department; treated as institution "
+                                   f"(model said {role})")
+        return "institution"
+    return role
+
+
+def _hold(item, why, report):
+    """A fact with no usable value must not replace a stated one: it is set aside (shown, not planned)."""
+    item.update(status="needs review", locked=True,
+                reason=f"value missing ({why}); not used, earlier values stay in force")
+    report["notes"].append(f"{item['id']}: {item['k']} {item['reason']}")
 
 
 def _failing(plan):
@@ -94,11 +161,18 @@ def process(text, source="input"):
     report = {"update_id": update_id, "mode": mode, "time": datetime.now().isoformat(timespec="seconds"),
               "source": source, "new_messages": [], "accepted": [], "rejected": [], "impact": {},
               "incomplete": False, "notes": []}
+    # committed state before this run; restored if the run fails before _transaction() commits, so a failed
+    # message is never stored as "seen" without its facts (the next run reads it again)
+    snapshot = {k: copy.deepcopy(state.get(k)) for k in ("messages", "items", "plan", "previous_plan", "next_order")}
+    committed = False
     try:
         seen = {m["hash"] for m in state["messages"]}
         blocks = [b for b in split_messages(text) if text_hash(b) not in seen]
         new = []
         for b in blocks:
+            if text_hash(b) in seen:     # the same message twice in one file: read it once (saves tokens)
+                report["notes"].append("duplicate message skipped: " + " ".join(b.split())[:60])
+                continue
             mid = f"M{len(state['messages']) + 1}"
             msg = {"id": mid, "text": b, "hash": text_hash(b), "update_id": update_id, "status": "pending",
                    "reason": "", "sender": "", "role": "", "date": ""}
@@ -119,8 +193,18 @@ def process(text, source="input"):
             report["incomplete"] = True
             report["notes"].append("reading call failed or ran out of time; previous plan kept")
             return _finish(state, report, trace, budgeter, calls_before)
+        omitted = [m for m in new if m["id"] not in parsed]
+        if omitted and parsed:
+            # messages the reply has no record for (omitted or unrepairable): re-read ONLY those, once, now
+            again = read_messages([{"id": m["id"], "text": m["text"]} for m in omitted],
+                                  known if mode == "update" else [], budgeter, trace, update_id)
+            got = sorted((again or {}).keys() & {m["id"] for m in omitted}, key=lambda x: int(x[1:]))
+            parsed.update({k: again[k] for k in got})
+            report["notes"].append(f"no record in the reply for {', '.join(m['id'] for m in omitted)}; "
+                                   f"re-read only those: {'got ' + ', '.join(got) if got else 'still missing'}")
 
         new_items = []
+        latest = _latest_month([(parsed[m["id"]].date or header(m["text"])["date"]) for m in new if m["id"] in parsed])
         for m in new:
             pm = parsed.get(m["id"])
             if pm is None:
@@ -128,38 +212,72 @@ def process(text, source="input"):
                 state["messages"].remove(m)
                 report["notes"].append(f"{m['id']} could not be read this run; run the command again to read it")
                 continue
+            hdr = header(m["text"])
+            pm.frm, pm.date = pm.frm or hdr["from"], pm.date or hdr["date"]
             m.update(sender=pm.frm, role=pm.role, date=pm.date)
             if pm.inj:
                 report["notes"].append(f"{m['id']}: contains instructions to the system; ignored as instructions")
-            if not pm.rel or not pm.it:
+            if not pm.it:   # facts extracted = relevant, even if the model also set rel=false (never drop them)
                 m["status"], m["reason"] = "irrelevant", "no planning facts"
                 continue
+            seen_facts = set()
             for it in pm.it:
+                fact_key = (it.a, norm(it.e), it.k, json.dumps(it.v, sort_keys=True, default=str), it.t, it.h)
+                if fact_key in seen_facts:      # the same fact twice from one message: keep one
+                    report["notes"].append(f"{m['id']}: duplicate fact {it.k}={it.v} ignored")
+                    continue
+                seen_facts.add(fact_key)
                 state["next_order"] += 1
                 item = {"id": f"{m['id']}.{len(new_items) + 1}", "msg": m["id"], "sender": pm.frm,
-                        "role": pm.role if pm.role in config.AUTHORITY else "unknown", "date": pm.date,
+                        "role": _sender_role(pm.role, pm.frm, report, m["id"]), "date": pm.date,
                         "a": it.a, "e": it.e, "k": it.k, "v": it.v, "u": it.u, "t": it.t, "h": it.h,
                         "q": it.q, "c": it.c, "status": "", "reason": "", "locked": False,
                         # full run: chronological by stated date; update: arrives after everything known
-                        "order": _order_key(pm.date, state["next_order"]) if mode == "full"
+                        "order": _order_key(pm.date, state["next_order"], latest) if mode == "full"
                         else 20_000 + state["next_order"]}
                 _normalize(item)
+                if missing(item):                # 3A: value lost by the model but stated in its own quote
+                    fix = recover(item)
+                    if fix:
+                        item["v_model"], item["v"] = item["v"], fix[0]
+                        item["v_source"] = "quote (Python)"
+                        report["notes"].append(f"{item['id']}: {fix[1]} (no model call)")
                 if item["k"] == "rule" or item["t"] == "rule":
                     if pm.inj:      # an instruction aimed at the system is never a planning rule
                         item["t"], item["k"] = "irrelevant", "other"
                     elif config.AUTHORITY.get(item["role"], 0) < config.AUTHORITY["vendor"]:
                         item["t"] = "suggestion"     # a request from someone without authority is not binding
+                        item["unauthorized_requirement"] = True    # shown as needing review, not as spending
                 new_items.append(item)
             _venue_prices(new_items, m["id"])
 
-        # escape hatch for rules the reader could not express (limited by the Budgeter)
+        # 3B: facts still without a value -> ONE targeted re-check of just those facts (only when needed)
+        still = [it for it in new_items if missing(it)]
+        if still:
+            _recheck_missing(still, new, budgeter, trace, update_id, report)
+
+        # rules the reader could not express: clear ones are converted in Python (no model call); only the
+        # rest use the model escape hatch (limited by the Budgeter). Nothing is dropped either way.
         for it in new_items:
             if it["k"] == "rule" and it["h"] and not checkable(it["c"]):
+                siblings = [x for x in new_items if x["msg"] == it["msg"] and x is not it and x["k"] != "rule"]
+                fit = python_rule(it, siblings)
+                if fit:
+                    kind, payload, why = fit
+                    if kind == "covered":     # kept as a record, its requirement is carried by the facts named
+                        it.update(k="other", t="fact", h=False, covered=why)
+                    elif kind == "c":
+                        it.update(c=payload, c_source="python")
+                    else:                     # a required break stated only inside the rule text
+                        it.update(a="schedule", k="break_min", e=payload[1], v=payload[0], t="fact", h=True, c=None)
+                    report["notes"].append(f"{it['id']}: {why} (no model call)")
+                    continue
                 c = _rule_fallback(it, budgeter, trace, update_id)
                 if c:
                     it["c"] = c
 
         _transaction(state, new_items, mode, report)
+        committed = True
         for m in new:
             if m["status"] == "pending":
                 mine = [i for i in state["items"] if i["msg"] == m["id"]]
@@ -182,7 +300,15 @@ def process(text, source="input"):
     except Exception as e:
         report["incomplete"] = True
         report["notes"].append(f"error: {type(e).__name__}: {e}; previous plan kept")
+        if not committed:
+            # roll back messages/facts/plan/order counter; the trace (calls made, tokens, errors) is kept as is
+            for k, v in snapshot.items():
+                state[k] = v
+            report["rolled_back"] = True
+            report["notes"].append("run rolled back: these messages were not stored as processed; "
+                                   "run the same input again to retry them")
         if type(e).__name__ == "ConfigError":
+            _finish(state, report, trace, budgeter, calls_before)
             raise
         return _finish(state, report, trace, budgeter, calls_before)
 
@@ -221,6 +347,14 @@ def _normalize(item):
         item["k"] = "requires_feature"           # a demanded facility, not a property of one venue
 
 
+def _hard_requirement(item):
+    """A stated must-have (rule or required facility). In a full run it is never dropped to make the plan pass:
+    if nothing satisfies it the plan must say so (INVALID / NEEDS CLARIFICATION), not hide it."""
+    # only from senders with authority over the event; a "rule" read from e.g. a vendor's notice can still be rejected
+    return bool(item.get("h")) and (item["t"] == "rule" or item["k"] in ("rule", "requires_feature")) and \
+        config.AUTHORITY.get(item["role"], 0) >= config.AUTHORITY["organizer"]
+
+
 def _transaction(state, new_items, mode, report):
     old_plan = state["plan"]
     old_valid = old_plan is not None and old_plan["validation"]["status"] == "VALID"
@@ -232,7 +366,8 @@ def _transaction(state, new_items, mode, report):
     # Try to make the plan valid by rejecting new items that break checks (latest first).
     if plan["validation"]["status"] == "INVALID":
         for it in sorted([i for i in items if i["id"] in new_ids and i["t"] not in NOT_FACT_KINDS
-                          and i["status"] == "accepted"], key=lambda x: -x["order"]):
+                          and i["status"] == "accepted" and not (mode == "full" and _hard_requirement(i))],
+                         key=lambda x: -x["order"]):
             before = _failing(plan) - baseline_fail if mode == "update" else _failing(plan)
             it["locked"], it["status"] = True, "rejected"
             resolve(items)

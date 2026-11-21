@@ -1,0 +1,32 @@
+#1 | From: Principal's office, email | Date: 1 Dec
+"Approved: a 3-hour hackathon for 90 students in teams of 3. Total budget Rs 300,000. Six staff will be on duty."
+
+#2 | From: Campus venues desk, WhatsApp | Date: 28 Nov
+"Lab A: 80 seats, Rs 40,000. Auditorium: 150 seats, Rs 95,000, ground floor pe hai. Hall C: 130 seats, Rs 70,000, second floor, lift nahi hai."
+
+#3 | From: Accessibility office, email | Date: 29 Nov
+"One of the judges uses a wheelchair, so the venue must be reachable without stairs."
+
+#4 | From: Judging coordinator, email | Date: 2 Dec
+"12 judges confirmed. Honorarium Rs 3,000 each. Each judge spends 10 minutes per team and takes at most 5 teams."
+
+#5 | From: Caterer, WhatsApp | Date: 25 Nov
+"Chicken karahi box Rs 650 per head."
+
+#6 | From: Caterer, WhatsApp | Date: 3 Dec
+"Salam! Rate update: karahi box ab Rs 700 per head, veg box Rs 550. Delivery Rs 5,000 flat lagegi."
+
+#7 | From: Student affairs, email | Date: 2 Dec
+"12 participants have asked for vegetarian meals."
+
+#8 | From: Finance, email | Date: 30 Nov
+"Already paid from the event budget: T-shirts Rs 45,000 and stickers Rs 5,000."
+
+#9 | From: Student society, WhatsApp | Date: 1 Dec
+"Can we hire a photographer? Quote is Rs 20,000."
+
+#10 | From: Cafeteria, notice | Date: 1 Dec
+"The cafeteria will remain closed on Sunday for cleaning."
+
+#8 | From: Finance, email | Date: 30 Nov
+"Already paid from the event budget: T-shirts Rs 45,000 and stickers Rs 5,000."
