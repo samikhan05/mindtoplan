@@ -8,10 +8,11 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-from facts import NOT_FACT_KINDS, num, parse_date, resolve
+from facts import NOT_FACT_KINDS, norm, num, parse_date, resolve
 from llm import Budgeter, Trace, call_model
 from planner import build_plan
 from reader import METRICS, header, read_messages, split_messages, text_hash
+from rulefit import python_rule
 from validate import checkable
 
 AREAS = ("venue", "schedule", "food", "judging", "budget")
@@ -157,7 +158,13 @@ def process(text, source="input"):
             if not pm.it:   # facts extracted = relevant, even if the model also set rel=false (never drop them)
                 m["status"], m["reason"] = "irrelevant", "no planning facts"
                 continue
+            seen_facts = set()
             for it in pm.it:
+                fact_key = (it.a, norm(it.e), it.k, json.dumps(it.v, sort_keys=True, default=str), it.t, it.h)
+                if fact_key in seen_facts:      # the same fact twice from one message: keep one
+                    report["notes"].append(f"{m['id']}: duplicate fact {it.k}={it.v} ignored")
+                    continue
+                seen_facts.add(fact_key)
                 state["next_order"] += 1
                 item = {"id": f"{m['id']}.{len(new_items) + 1}", "msg": m["id"], "sender": pm.frm,
                         "role": pm.role if pm.role in config.AUTHORITY else "unknown", "date": pm.date,
@@ -175,9 +182,22 @@ def process(text, source="input"):
                 new_items.append(item)
             _venue_prices(new_items, m["id"])
 
-        # escape hatch for rules the reader could not express (limited by the Budgeter)
+        # rules the reader could not express: clear ones are converted in Python (no model call); only the
+        # rest use the model escape hatch (limited by the Budgeter). Nothing is dropped either way.
         for it in new_items:
             if it["k"] == "rule" and it["h"] and not checkable(it["c"]):
+                siblings = [x for x in new_items if x["msg"] == it["msg"] and x is not it and x["k"] != "rule"]
+                fit = python_rule(it, siblings)
+                if fit:
+                    kind, payload, why = fit
+                    if kind == "covered":     # kept as a record, its requirement is carried by the facts named
+                        it.update(k="other", t="fact", h=False, covered=why)
+                    elif kind == "c":
+                        it.update(c=payload, c_source="python")
+                    else:                     # a required break stated only inside the rule text
+                        it.update(a="schedule", k="break_min", e=payload[1], v=payload[0], t="fact", h=True, c=None)
+                    report["notes"].append(f"{it['id']}: {why} (no model call)")
+                    continue
                 c = _rule_fallback(it, budgeter, trace, update_id)
                 if c:
                     it["c"] = c

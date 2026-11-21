@@ -109,7 +109,7 @@ def script(monkeypatch):
 
 
 RULE = ("Registrar", "institution", [{"a": "venue", "e": "", "k": "rule", "t": "rule", "h": True,
-                                      "q": "hall must hold no more than 150 people"}], False)
+                                      "q": "the hall must feel spacious for every team"}], False)
 
 
 def test_rule_conversion_returning_a_list_keeps_the_requirement(script, monkeypatch):

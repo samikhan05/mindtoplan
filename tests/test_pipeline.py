@@ -147,7 +147,7 @@ def test_unexpressed_rule_gets_one_area_tagged_call(script, monkeypatch):
     pipeline.process("PACK all facts")
     script["no more than"] = ("Registrar", "institution",
                               [{"a": "venue", "e": "", "k": "rule", "t": "rule", "h": True,
-                                "q": "hall must hold no more than 150 people"}], False)
+                                "q": "the hall must feel spacious for every team"}], False)
     calls = []
 
     def fake_call(budgeter, trace, area, system, user, ids, uid, max_tokens=0, **kw):
