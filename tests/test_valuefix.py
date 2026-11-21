@@ -53,3 +53,27 @@ def test_missing_only_flags_value_fields_without_usable_values():
     assert not missing(it("price_per_head", "x", v=700))
     assert not missing(it("feature", "x", v=None))                         # not a value field
     assert not missing(it("price_per_head", "x", v=None, t="suggestion"))  # suggestions are never planned
+
+
+# regression from benchmark run (pack A, a_u3): "delivery charge waived" read as delivery_fee with no value
+@pytest.mark.parametrize("k, q, want", [
+    ("delivery_fee", "Good news: delivery charge waived, no delivery fee now.", 0),
+    ("delivery_fee", "Delivery free hai", 0),
+    ("delivery_fee", "free delivery from tomorrow", 0),
+    ("price", "The hall is free of charge for students", 0),
+    ("honorarium", "judges will help without any charge", 0),
+])
+def test_explicit_no_charge_wording_means_zero(k, q, want):
+    assert recover(it(k, q))[0] == want
+
+
+@pytest.mark.parametrize("k, q", [
+    ("price", "Hall A is free on Monday"),                     # free = available, not a price
+    ("price_per_head", "free delivery on all lunch boxes"),     # delivery wording does not price the meal
+    ("delivery_fee", "delivery fee waived above Rs 50,000"),    # a number is present: no guessing
+    ("students", "entry is free for all students"),             # not a charge field
+    ("price", "parking is free"),                               # bare "free" never counts
+])
+def test_no_charge_wording_is_not_over_applied(k, q):
+    got = recover(it(k, q))
+    assert got is None or got[0] != 0

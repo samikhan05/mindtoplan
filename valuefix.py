@@ -43,9 +43,24 @@ def _clock(m):
     return f"{h:02d}:{mi:02d}" if h < 24 and mi < 60 else None
 
 
+# Explicit "no charge" wording = 0 for a charge the model read without a value. Deliberately narrow: a bare "free"
+# never counts ("Hall A is free on Monday" means available); delivery phrases only for the delivery fee.
+CHARGE_KEYS = {"delivery_fee", "price", "price_per_head", "honorarium", "cost_per_team", "cost_per_student",
+               "cost_per_person", "cost_per_judge"}
+_NO_CHARGE = re.compile(r"\b(waived?|no (?:\w+ )?(?:charges?|fees?)|free of (?:charge|cost)|without (?:any )?charge|"
+                        r"muft)\b", re.I)
+_FREE_DELIVERY = re.compile(r"\b(free delivery|delivery (?:is |will be |hai |bhi )?free)\b", re.I)
+
+
+def _zero_charge(k, text):
+    return k in CHARGE_KEYS and (bool(_NO_CHARGE.search(text)) or (k == "delivery_fee" and bool(_FREE_DELIVERY.search(text))))
+
+
 def recover(item):
     """(value, note) when the quote holds exactly one unambiguous number of the right kind, else None."""
     q, k = item.get("q") or "", item["k"]
+    if _zero_charge(k, q) and not _NUM.findall(q):
+        return 0, f"{k} 0 recovered from its quote (no-charge wording)"
     times = list(_TIME.finditer(q))
     if k in TIME_KEYS:
         # one clock time and no other number in the quote
@@ -89,6 +104,8 @@ def accepts(item, value, text):
     v = num(value)
     if v is None:
         return None
+    if v == 0 and _zero_charge(k, text):
+        return 0                                        # "delivery charge waived": 0 is what the message says
     written = {float((m.group(1) + (m.group(2) or "")).replace(",", "")) for m in _NUM.finditer(text)}
     if v in written:
         return int(v) if v == int(v) else v

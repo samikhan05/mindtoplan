@@ -95,3 +95,9 @@ def test_value_in_quote_is_recovered_in_python_before_any_recheck(script, monkey
 ])
 def test_accepts_only_values_written_in_text(k, value, text, want):
     assert accepts({"k": k}, value, text) == want
+
+
+def test_recheck_zero_accepted_only_with_no_charge_wording():
+    assert accepts({"k": "delivery_fee"}, 0, "delivery charge waived, no delivery fee now") == 0
+    assert accepts({"k": "delivery_fee"}, 0, "delivery is Rs 5,000") is None
+    assert accepts({"k": "price"}, 0, "Hall A is free on Monday") is None

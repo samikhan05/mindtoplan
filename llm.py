@@ -11,7 +11,7 @@ AREAS = ("reading", "venue", "schedule", "food", "judging", "budget")
 
 class ConfigError(Exception):
     pass
-
+    
 
 class BudgetExhausted(Exception):
     pass
@@ -136,11 +136,17 @@ def _balance(s):
     return "".join(out) + "".join(reversed(stack))
 
 
+_BROKEN_ROUTES = set()   # routes that answered with an error a retry cannot fix (e.g. 402 no credit): skipped
+
+
 def _routes():
-    """Primary route from .env, plus an optional FALLBACK_* route used only when the primary is overloaded."""
+    """Primary route from .env, plus an optional FALLBACK_* route used only when the primary is overloaded.
+    A fallback that already failed with an unfixable error in this process is skipped (saves a wasted attempt)."""
     r = [(config.BASE_URL, config.MODEL_NAME, config.API_KEY)]
     if config.FALLBACK_BASE_URL and config.FALLBACK_MODEL_NAME and config.FALLBACK_API_KEY:
-        r.append((config.FALLBACK_BASE_URL, config.FALLBACK_MODEL_NAME, config.FALLBACK_API_KEY))
+        fb = (config.FALLBACK_BASE_URL, config.FALLBACK_MODEL_NAME, config.FALLBACK_API_KEY)
+        if fb[:2] not in _BROKEN_ROUTES:
+            r.append(fb)
     return r
 
 
@@ -156,7 +162,8 @@ def _client(timeout, route=None):
 
 
 RETRYABLE = (429, 500, 502, 503, 504)   # overloaded / rate limited / server error: worth another attempt
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 3          # any error
+OVERLOAD_ATTEMPTS = 4     # overload/rate-limit errors only (they return no tokens); still bounded by the Budgeter
 
 
 class ResponseSchemaError(Exception):
@@ -172,7 +179,10 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
     Returns the parsed JSON value or None. Never raises for API or reply errors."""
     assert area in AREAS
     routes, route = _routes(), _routes()[0]
-    for attempt in range(1, attempts + 1):
+    limit = attempts                     # raised to OVERLOAD_ATTEMPTS only while the provider reports overload
+    attempt = 0
+    while attempt < limit:
+        attempt += 1
         if not budgeter.can_call():
             budgeter.incomplete = True
             return None
@@ -224,8 +234,18 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
                 rec["error"] += (f" | body: {body[:400]}" if body else " | empty body") + \
                     f" | endpoint {route[0]} model {route[1]}"
             status = getattr(e, "status_code", None)
+            if status == 429 and "exceeded your current quota" in rec["error"].lower():
+                # a used-up quota (e.g. a daily free-tier limit) is not a short overload: waiting will not fix it,
+                # but another provider can still answer the same request
+                if len(routes) > 1 and route == routes[0]:
+                    route = routes[1]
+                    rec["error"] += f" | quota used up: trying fallback {route[1]}"
+                    continue
+                status = 403
+                rec["error"] += " | quota used up: treated as not retryable"
             if status is not None and status not in RETRYABLE:
                 if len(routes) > 1 and route == routes[1]:
+                    _BROKEN_ROUTES.add(route[:2])   # skip it for the rest of this process, not just this call
                     route = routes[0]          # the backup itself is broken (e.g. bad key): back to primary
                     routes = routes[:1]
                     rec["error"] += " | fallback unusable, retrying primary"
@@ -235,11 +255,17 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
                 rec["error"] += " | not retried (a retry cannot fix this)"
                 return None   # finally still records it
             if status in RETRYABLE:
+                if attempts == MAX_ATTEMPTS:
+                    limit = max(limit, OVERLOAD_ATTEMPTS)   # short provider outages: one more patient attempt
                 if len(routes) > 1 and route == routes[0]:
                     route = routes[1]          # same task, backup route; no pause needed
                     rec["error"] += f" | retrying via fallback {route[1]}"
-                elif budgeter.remaining() > 15:
-                    time.sleep(3 * attempt)    # overloaded / rate limited: back off before retrying
+                else:                          # overloaded / rate limited: back off 4, 8, 16 s within the budget
+                    pause = min(4 * 2 ** (attempt - 1), budgeter.remaining() - 15)
+                    if pause > 0 and attempt < limit:
+                        time.sleep(pause)
+            elif attempt >= MAX_ATTEMPTS:
+                limit = attempt                # non-overload errors (e.g. invalid JSON) keep the old limit
         finally:
             rec["duration_s"] = round(time.monotonic() - t0, 2)
             if rec["ok"] or rec["error"]:

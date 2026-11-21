@@ -96,8 +96,32 @@ def test_both_providers_overloaded_returns_none_with_every_attempt_traced(monkey
     seen = _clients(monkeypatch, {"primary": [503], "backup": [503]})
     t, b = Trace(), Budgeter("update")
     assert llm.call_model(b, t, "reading", "s", "u", ["M1"], "U1") is None
-    assert seen == ["primary", "backup", "backup"] and b.calls == 3 == len(t.records)
+    assert seen == ["primary", "backup", "backup", "backup"] and b.calls == 4 == len(t.records)
     assert all(not r["ok"] and "503" in r["error"] for r in t.records)
+
+
+def test_broken_fallback_is_skipped_on_later_calls(monkeypatch):
+    # regression (benchmark): every call wasted an attempt on a fallback that answered 402 "requires more credits"
+    _route(monkeypatch, fallback=True)
+    seen = _clients(monkeypatch, {"primary": [503, '{"ok": true}'], "backup": [402]})
+    assert llm.call_model(Budgeter("update"), Trace(), "reading", "s", "u", ["M1"], "U1") == {"ok": True}
+    assert seen == ["primary", "backup", "primary"]
+    seen.clear()
+    _clients(monkeypatch, {"primary": [503, '{"ok": true}'], "backup": [402]})
+    seen2 = _clients(monkeypatch, {"primary": [503, '{"ok": true}'], "backup": [402]})
+    assert llm.call_model(Budgeter("update"), Trace(), "reading", "s", "u", ["M1"], "U2") == {"ok": True}
+    assert seen2 == ["primary", "primary"]            # the broken backup is not tried again
+
+
+def test_overload_gets_one_patient_extra_attempt_but_bad_json_does_not(monkeypatch):
+    _route(monkeypatch)
+    seen = _clients(monkeypatch, {"primary": [503, 503, 503, '{"ok": true}']})
+    t = Trace()
+    assert llm.call_model(Budgeter("full"), t, "reading", "s", "u", ["M1"], "FULL") == {"ok": True}
+    assert len(seen) == 4 and sum(r["total_tokens"] is None for r in t.records) == 3   # failed tries: no tokens
+    seen = _clients(monkeypatch, {"primary": ['sorry, I cannot help with that']})
+    assert llm.call_model(Budgeter("full"), Trace(), "reading", "s", "u", ["M1"], "FULL") is None
+    assert len(seen) == 3                              # invalid JSON keeps the old limit of 3
 
 
 # 4, 7-9: rule conversion and rollback -------------------------------------------------------------------------
@@ -159,3 +183,50 @@ def test_successful_update_still_commits_normally(script):
     state, rep = pipeline.process("regular meal now 1000 per head")
     assert not rep.get("rolled_back") and rep["accepted"]
     assert state["plan"]["food"]["pph"] == 1000
+
+
+
+class _QuotaError(Exception):
+    """429 whose body says the quota is used up (Google free tier), as seen in the benchmark."""
+    status_code = 429
+
+    def __init__(self):
+        super().__init__("Error code: 429")
+        self.response = NS(text='{"error":{"code":429,"message":"You exceeded your current quota, please check '
+                                'your plan and billing details."}}')
+
+
+def test_used_up_quota_is_not_retried_like_an_overload(monkeypatch):
+    _route(monkeypatch)
+    calls = []
+
+    def make(timeout, route=None):
+        def create(**kw):
+            calls.append(1)
+            raise _QuotaError()
+        return NS(chat=NS(completions=NS(create=create)))
+    monkeypatch.setattr(llm, "_client", make)
+    t, b = Trace(), Budgeter("update")
+    assert llm.call_model(b, t, "reading", "s", "u", ["M1"], "U1") is None
+    assert len(calls) == 1 and b.calls == 1                     # stops at once (no 4 x backoff)
+    assert "quota used up" in t.records[0]["error"]
+
+
+def test_used_up_quota_on_primary_still_tries_a_working_fallback(monkeypatch):
+    _route(monkeypatch, fallback=True)
+    seen = []
+
+    def make(timeout, route=None):
+        model = (route or llm._routes()[0])[1]
+
+        def create(**kw):
+            seen.append(model)
+            if model == "primary":
+                raise _QuotaError()
+            return NS(model=model, usage=NS(prompt_tokens=7, completion_tokens=3, total_tokens=10),
+                      choices=[NS(message=NS(content='{"ok": true}'))])
+        return NS(chat=NS(completions=NS(create=create)))
+    monkeypatch.setattr(llm, "_client", make)
+    t = Trace()
+    assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") == {"ok": True}
+    assert seen == ["primary", "backup"] and "trying fallback" in t.records[0]["error"]

@@ -296,7 +296,7 @@ def test_broken_fallback_goes_back_to_primary(monkeypatch):
     seen = _fake_clients(monkeypatch, {"primary": 503, "backup": 401})
     t = Trace()
     assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") is None
-    assert seen == ["primary", "backup", "primary"]      # 3 attempts, the last one back on the primary
+    assert seen == ["primary", "backup", "primary", "primary"]   # backup dropped; overload gets a patient 4th try
     assert "retrying primary" in t.records[1]["error"]
 
 
