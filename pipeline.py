@@ -118,6 +118,22 @@ def _recheck_missing(items, msgs, budgeter, trace, update_id, report):
         report["notes"].append(f"{it['id']}: {it['k']} {ok} filled by targeted re-check")
 
 
+ORG_SENDER = re.compile(r"\b(office|department|dept|registrar|dean|directorate|administration|faculty|"
+                        r"university|college|ministry|authority)\b", re.I)
+
+
+def _sender_role(role, sender, report, msg_id):
+    """The model's role, unless the sender's own name denotes an organisation unit and the model called it an
+    individual/student (e.g. 'Student disability office' read as 'student'). Only upgrades to institution."""
+    role = role if role in config.AUTHORITY else "unknown"
+    if role in ("student", "individual", "unknown") and ORG_SENDER.search(sender or ""):
+        if not any(msg_id in n and "treated as institution" in n for n in report["notes"]):
+            report["notes"].append(f"{msg_id}: sender '{sender}' names an office/department; treated as institution "
+                                   f"(model said {role})")
+        return "institution"
+    return role
+
+
 def _hold(item, why, report):
     """A fact with no usable value must not replace a stated one: it is set aside (shown, not planned)."""
     item.update(status="needs review", locked=True,
@@ -177,6 +193,15 @@ def process(text, source="input"):
             report["incomplete"] = True
             report["notes"].append("reading call failed or ran out of time; previous plan kept")
             return _finish(state, report, trace, budgeter, calls_before)
+        omitted = [m for m in new if m["id"] not in parsed]
+        if omitted and parsed:
+            # messages the reply has no record for (omitted or unrepairable): re-read ONLY those, once, now
+            again = read_messages([{"id": m["id"], "text": m["text"]} for m in omitted],
+                                  known if mode == "update" else [], budgeter, trace, update_id)
+            got = sorted((again or {}).keys() & {m["id"] for m in omitted}, key=lambda x: int(x[1:]))
+            parsed.update({k: again[k] for k in got})
+            report["notes"].append(f"no record in the reply for {', '.join(m['id'] for m in omitted)}; "
+                                   f"re-read only those: {'got ' + ', '.join(got) if got else 'still missing'}")
 
         new_items = []
         latest = _latest_month([(parsed[m["id"]].date or header(m["text"])["date"]) for m in new if m["id"] in parsed])
@@ -204,7 +229,7 @@ def process(text, source="input"):
                 seen_facts.add(fact_key)
                 state["next_order"] += 1
                 item = {"id": f"{m['id']}.{len(new_items) + 1}", "msg": m["id"], "sender": pm.frm,
-                        "role": pm.role if pm.role in config.AUTHORITY else "unknown", "date": pm.date,
+                        "role": _sender_role(pm.role, pm.frm, report, m["id"]), "date": pm.date,
                         "a": it.a, "e": it.e, "k": it.k, "v": it.v, "u": it.u, "t": it.t, "h": it.h,
                         "q": it.q, "c": it.c, "status": "", "reason": "", "locked": False,
                         # full run: chronological by stated date; update: arrives after everything known
@@ -222,6 +247,7 @@ def process(text, source="input"):
                         item["t"], item["k"] = "irrelevant", "other"
                     elif config.AUTHORITY.get(item["role"], 0) < config.AUTHORITY["vendor"]:
                         item["t"] = "suggestion"     # a request from someone without authority is not binding
+                        item["unauthorized_requirement"] = True    # shown as needing review, not as spending
                 new_items.append(item)
             _venue_prices(new_items, m["id"])
 

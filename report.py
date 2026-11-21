@@ -43,6 +43,8 @@ def plan_text(state):
     L += ["", "SCHEDULE"]
     for blk in s["blocks"]:
         L.append(f"  {blk['time']:<16} {blk['name']} ({blk['min']} min)")
+    for n in (s.get("issues") or {}).get("notes", []):
+        L.append(f"  note: {n}")
     L += ["", "FOOD"]
     f = p["food"]
     if f:

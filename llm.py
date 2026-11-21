@@ -71,23 +71,39 @@ def parse_json(text):
         t = t.split("\n", 1)[1] if "\n" in t else t[3:]
     start = min([i for i in (t.find("{"), t.find("[")) if i >= 0], default=0)
     try:
-        value, _ = json.JSONDecoder().raw_decode(t[start:])
-        return value
+        value, end = json.JSONDecoder().raw_decode(t[start:])
+        # a stray closer can end the value early ('...}]}],"id":"M4",...'): if more message records follow,
+        # stopping here would silently lose them, so repair record by record instead
+        if not re.search(r'"id"\s*:\s*"', t[start + end:]):
+            return value
     except json.JSONDecodeError:
         pass
-    # small models sometimes drop or misplace a bracket: repair each {"id": ...} record on its own
-    starts = [m.start() for m in re.finditer(r'\{\s*"id"\s*:', t)]
+    # small models sometimes drop or misplace a bracket: repair each {"id": ...} record on its own.
+    # A record starts at '{"id":' or, when its '{' was dropped, at '],"id":' / '},"id":' after a closed record.
+    starts = []
+    for m in re.finditer(r'"id"\s*:', t):
+        i = m.start() - 1
+        while i >= 0 and t[i].isspace():
+            i -= 1
+        if i >= 0 and t[i] == "{":
+            starts.append((i, ""))
+        elif i >= 0 and t[i] == ",":
+            j = i - 1
+            while j >= 0 and t[j].isspace():
+                j -= 1
+            if j >= 0 and t[j] in "]}":
+                starts.append((i + 1, "{"))      # opening brace missing: supply it
     if not starts:
         value, _ = json.JSONDecoder().raw_decode(_balance(t[start:]))
         return value
     records = []
-    for a, z in zip(starts, starts[1:] + [len(t)]):
-        chunk = t[a:z].rstrip().rstrip(",").rstrip()
+    for (a, pre), (z, _) in zip(starts, starts[1:] + [(len(t), "")]):
+        chunk = (pre + t[a:z]).rstrip().rstrip(",").rstrip()
         try:
             rec, _ = json.JSONDecoder().raw_decode(_balance(chunk))
             records.append(rec)
         except json.JSONDecodeError:
-            continue          # an unrepairable record is skipped; its message is re-read on the next run
+            continue          # an unrepairable record is skipped; its message is re-read (see pipeline)
     if not records:
         raise json.JSONDecodeError("no readable message records", t, 0)
     return {"m": records}
