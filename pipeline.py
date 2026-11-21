@@ -13,6 +13,7 @@ from llm import Budgeter, Trace, call_model
 from planner import build_plan
 from reader import METRICS, header, read_messages, split_messages, text_hash
 from rulefit import python_rule
+from valuefix import missing, recover
 from validate import checkable
 
 AREAS = ("venue", "schedule", "food", "judging", "budget")
@@ -86,6 +87,42 @@ def _rule_fallback(item, budgeter, trace, update_id):
     # anything but a usable {"m": ...} object leaves the rule as it was (no checkable form): it is kept and shows
     # as UNRESOLVED, so the plan reads NEEDS CLARIFICATION instead of the requirement disappearing
     return out if isinstance(out, dict) and out.get("m") else None
+
+
+RECHECK_SYSTEM = ('Each listed fact was read without its value. Read ONLY the given message(s). Return JSON '
+                  '{"v":{"<fact id>":value}}: a plain number (money in rupees, durations in minutes) or "HH:MM" for a '
+                  'time; null if the message does not state it. Copy what is written; do not compute or guess.')
+
+
+def _recheck_missing(items, msgs, budgeter, trace, update_id, report):
+    """Targeted verification: only the facts Python found incomplete, with only their own messages.
+    A returned value is used only if that number/time is actually written in the message (no invented values)."""
+    from valuefix import accepts
+    text = {m["id"]: m["text"] for m in msgs}
+    ids = sorted({i["msg"] for i in items}, key=lambda x: int(x[1:]))
+    user = "\n".join(f'<msg id="{mid}">\n{text[mid]}\n</msg>' for mid in ids) + "\nMissing values:\n" + \
+        "\n".join(f'{i["id"]}: {i["k"]} of "{i["e"] or i["a"]}"' for i in items)
+    out = call_model(budgeter, trace, "reading", RECHECK_SYSTEM, user, ids, update_id,
+                     max_tokens=40 + 20 * len(items), attempts=2, expect=dict)
+    vals = out.get("v") if isinstance(out, dict) and isinstance(out.get("v"), dict) else {}
+    for it in items:
+        val = vals.get(it["id"])
+        if val is None:
+            _hold(it, "no value even after the targeted re-check", report)
+            continue
+        ok = accepts(it, val, text[it["msg"]])
+        if ok is None:
+            _hold(it, f"re-check answer {val!r} is not written in {it['msg']}; ignored", report)
+            continue
+        it["v_model"], it["v"], it["v_source"] = it["v"], ok, "targeted re-check (model, verified in text)"
+        report["notes"].append(f"{it['id']}: {it['k']} {ok} filled by targeted re-check")
+
+
+def _hold(item, why, report):
+    """A fact with no usable value must not replace a stated one: it is set aside (shown, not planned)."""
+    item.update(status="needs review", locked=True,
+                reason=f"value missing ({why}); not used, earlier values stay in force")
+    report["notes"].append(f"{item['id']}: {item['k']} {item['reason']}")
 
 
 def _failing(plan):
@@ -174,6 +211,12 @@ def process(text, source="input"):
                         "order": _order_key(pm.date, state["next_order"], latest) if mode == "full"
                         else 20_000 + state["next_order"]}
                 _normalize(item)
+                if missing(item):                # 3A: value lost by the model but stated in its own quote
+                    fix = recover(item)
+                    if fix:
+                        item["v_model"], item["v"] = item["v"], fix[0]
+                        item["v_source"] = "quote (Python)"
+                        report["notes"].append(f"{item['id']}: {fix[1]} (no model call)")
                 if item["k"] == "rule" or item["t"] == "rule":
                     if pm.inj:      # an instruction aimed at the system is never a planning rule
                         item["t"], item["k"] = "irrelevant", "other"
@@ -181,6 +224,11 @@ def process(text, source="input"):
                         item["t"] = "suggestion"     # a request from someone without authority is not binding
                 new_items.append(item)
             _venue_prices(new_items, m["id"])
+
+        # 3B: facts still without a value -> ONE targeted re-check of just those facts (only when needed)
+        still = [it for it in new_items if missing(it)]
+        if still:
+            _recheck_missing(still, new, budgeter, trace, update_id, report)
 
         # rules the reader could not express: clear ones are converted in Python (no model call); only the
         # rest use the model escape hatch (limited by the Budgeter). Nothing is dropped either way.
