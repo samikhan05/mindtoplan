@@ -46,4 +46,6 @@ def base_pack():
 def tmp_state(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / ".state")
     monkeypatch.setattr(config, "OUT_DIR", tmp_path / "out")
+    for k in ("FALLBACK_BASE_URL", "FALLBACK_MODEL_NAME", "FALLBACK_API_KEY"):
+        monkeypatch.setattr(config, k, "")   # tests never depend on the developer's .env fallback
     yield tmp_path

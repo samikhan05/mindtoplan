@@ -131,8 +131,9 @@ def test_failed_call_recorded_and_totals_from_usage(monkeypatch):
     monkeypatch.setattr(openai, "OpenAI", Boom)
     t = Trace()
     assert llm.call_model(Budgeter("update"), t, "food", "s", "u", ["M1"], "U1") is None
-    assert len(t.records) == 2 and all(not r["ok"] and r["total_tokens"] is None for r in t.records)
-    assert t.totals()["unavailable"] == 2 and t.totals()["total"] == 0
+    n = llm.MAX_ATTEMPTS
+    assert len(t.records) == n and all(not r["ok"] and r["total_tokens"] is None for r in t.records)
+    assert t.totals()["unavailable"] == n and t.totals()["total"] == 0
     t.records.append({**t.records[0], "input_tokens": 7, "output_tokens": 3, "total_tokens": 10})
     assert t.totals()["total"] == 10
 
@@ -235,3 +236,65 @@ def test_hard_flagged_venue_feature_is_not_a_requirement(script):
     state, _ = pipeline.process("PACK all facts")
     assert state["plan"]["venue"]["required_features"] == []
     assert state["plan"]["validation"]["status"] == "VALID"
+
+
+class _StatusError(Exception):
+    def __init__(self, status):
+        super().__init__(f"Error code: {status}")
+        self.status_code = status
+
+
+def _fake_clients(monkeypatch, behaviour):
+    """behaviour: model name -> status code to raise, or None to answer {"ok": true}."""
+    from types import SimpleNamespace as NS
+    seen = []
+
+    def make(timeout, route=None):
+        base, model, key = route or llm._routes()[0]
+
+        def create(**kw):
+            seen.append(model)
+            if behaviour[model]:
+                raise _StatusError(behaviour[model])
+            return NS(model=model, usage=NS(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+                      choices=[NS(message=NS(content='{"ok": true}'))])
+        return NS(chat=NS(completions=NS(create=create)))
+    monkeypatch.setattr(llm, "_client", make)
+    return seen
+
+
+def test_overloaded_primary_retries_once_on_fallback(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "k"); monkeypatch.setattr(config, "BASE_URL", "http://a")
+    monkeypatch.setattr(config, "MODEL_NAME", "primary")
+    monkeypatch.setattr(config, "FALLBACK_BASE_URL", "http://b"); monkeypatch.setattr(config, "FALLBACK_API_KEY", "k2")
+    monkeypatch.setattr(config, "FALLBACK_MODEL_NAME", "backup")
+    seen = _fake_clients(monkeypatch, {"primary": 503, "backup": None})
+    t = Trace()
+    assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") == {"ok": True}
+    assert seen == ["primary", "backup"]
+    assert [r["model"] for r in t.records] == ["primary", "backup"] and [r["ok"] for r in t.records] == [False, True]
+    assert "fallback" in t.records[0]["error"]
+
+
+def test_bad_request_is_not_retried(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "k"); monkeypatch.setattr(config, "BASE_URL", "http://a")
+    monkeypatch.setattr(config, "MODEL_NAME", "primary")
+    seen = _fake_clients(monkeypatch, {"primary": 400})
+    t = Trace()
+    b = Budgeter("update")
+    assert llm.call_model(b, t, "reading", "s", "u", ["M1"], "U1") is None
+    assert seen == ["primary"] and b.calls == 1 and "not retried" in t.records[0]["error"]
+
+
+def test_broken_fallback_goes_back_to_primary(monkeypatch):
+    monkeypatch.setattr(config, "API_KEY", "k"); monkeypatch.setattr(config, "BASE_URL", "http://a")
+    monkeypatch.setattr(config, "MODEL_NAME", "primary")
+    monkeypatch.setattr(config, "FALLBACK_BASE_URL", "http://b"); monkeypatch.setattr(config, "FALLBACK_API_KEY", "bad")
+    monkeypatch.setattr(config, "FALLBACK_MODEL_NAME", "backup")
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+    seen = _fake_clients(monkeypatch, {"primary": 503, "backup": 401})
+    t = Trace()
+    assert llm.call_model(Budgeter("update"), t, "reading", "s", "u", ["M1"], "U1") is None
+    assert seen == ["primary", "backup", "primary"]      # 3 attempts, the last one back on the primary
+    assert "retrying primary" in t.records[1]["error"]

@@ -12,6 +12,10 @@ BASE_URL = os.getenv("BASE_URL", "").strip()
 MODEL_NAME = os.getenv("MODEL_NAME", "").strip()
 API_KEY = os.getenv("API_KEY", "").strip()
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "").strip()   # optional, for thinking models (e.g. low)
+# Optional backup route, used only when the primary answers "overloaded" (429/5xx): same task, other provider
+FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "").strip()
+FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "").strip()
+FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY", "").strip()
 ALLOWED_MODELS =[m.strip() for m in os.getenv("ALLOWED_MODELS", "").split(",") if m.strip()]
 
 STATE_DIR = ROOT / ".state"
