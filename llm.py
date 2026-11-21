@@ -157,6 +157,11 @@ def call_model(budgeter, trace, area, system, user, message_ids, update_id, max_
             raise
         except Exception as e:  # API error, timeout or invalid JSON: record honestly
             rec["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+            resp = getattr(e, "response", None)
+            if resp is not None:   # providers sometimes put the real reason only in the body: keep it
+                body = (getattr(resp, "text", "") or "").strip()
+                rec["error"] += (f" | body: {body[:400]}" if body else " | empty body") + \
+                    f" | endpoint {config.BASE_URL} model {config.MODEL_NAME}"
             if getattr(e, "status_code", None) in (429, 500, 503) and budgeter.remaining() > 15:
                 time.sleep(3)   # overloaded / rate limited: brief pause before the single retry
         finally:

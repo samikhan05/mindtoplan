@@ -5,7 +5,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent
-load_dotenv(ROOT / ".env")
+load_dotenv(ROOT / ".env", override=True)   # .env wins: editors (e.g. VS Code) may pre-load it into the
+                                             # terminal without expanding ${VAR}, leaving a literal key
 
 BASE_URL = os.getenv("BASE_URL", "").strip()
 MODEL_NAME = os.getenv("MODEL_NAME", "").strip()
